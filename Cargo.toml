@@ -1,0 +1,24 @@
+[package]
+name = "alignomatic"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bio = ">=2.0.0"
+minimap2 = { version = "0.1.20", features = ["htslib", "simde"] }
+num_cpus = "1.16.0"
+rust-htslib = { version = "0.47.0", default-features = false }
+bwa = { git = "https://github.com/kgori/rust-bwa.git", branch = "dev" }
+clap = { version = "4.5.20", features = ["derive"] }
+anyhow = "1.0.89"
+flate2 = "1.0.34"
+log = "0.4.22"
+env_logger = "0.11.5"
+libc = "0.2.159"
+niffler = "2.6.0"
+
+# Tips on making bindgen work:
+# Use the pacbio conda environment and set environment variables
+# LIBCLANG_PATH="/nfs/dog_n_devil/kevin/micromamba/envs/pacbio/lib"
+# BINDGEN_EXTRA_CLANG_ARGS="-I/nfs/dog_n_devil/kevin/micromamba/envs/pacbio/include"
+# 'pacbio' has clang and libclang installed

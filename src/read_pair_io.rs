@@ -1,9 +1,11 @@
 use anyhow::{anyhow, Result};
 use bio::io::fastq::{self, FastqRead};
+use rust_htslib::bam;
 use log::{error, info};
 use niffler;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io;
+use crate::mapping_status::MappingStatus;
 
 /// ReadPairIterator handles reading input from paired fastq files.
 /// API summary:
@@ -15,8 +17,8 @@ use std::io::{BufReader, Read};
 /// The batch size is the number of read pairs to return (so the total number
 /// of reads is double this).
 pub struct ReadPairIterator {
-    reader1: fastq::Reader<BufReader<Box<dyn Read>>>,
-    reader2: fastq::Reader<BufReader<Box<dyn Read>>>,
+    reader1: fastq::Reader<io::BufReader<Box<dyn io::Read>>>,
+    reader2: fastq::Reader<io::BufReader<Box<dyn io::Read>>>,
 }
 
 impl ReadPairIterator {
@@ -32,18 +34,16 @@ impl ReadPairIterator {
         Ok(Self { reader1, reader2 })
     }
 
-    pub fn batch(&mut self, batch_size: usize) -> Vec<fastq::Record> {
-        let mut batch = Vec::with_capacity(batch_size * 2);
+    pub fn batch(&mut self, batch_size: usize) -> Vec<ReadPair> {
+        let mut batch = Vec::with_capacity(batch_size);
 
         for _ in 0..batch_size {
             if let Some(read_pair) = self.next() {
-                batch.push(read_pair.read1);
-                batch.push(read_pair.read2);
+                batch.push(read_pair);
             } else {
                 break;
             }
         }
-
         batch
     }
 }
@@ -75,8 +75,8 @@ impl Iterator for ReadPairIterator {
 #[derive(Debug)]
 pub struct ReadPair {
     pub id: String,
-    pub read1: fastq::Record,
-    pub read2: fastq::Record,
+    pub read1: SequencingRead,
+    pub read2: SequencingRead,
 }
 
 impl ReadPair {
@@ -92,6 +92,8 @@ impl ReadPair {
         }
         if let Some(id) = Self::strip_comment(read1.id()) {
             let id = id.to_string();
+            let read1 = SequencingRead::new(read1);
+            let read2 = SequencingRead::new(read2);
             return Ok(Self { id, read1, read2 });
         }
         Err(anyhow!("Read IDs are empty"))
@@ -100,5 +102,22 @@ impl ReadPair {
     // private function to strip away comments from the read id
     fn strip_comment(id: &str) -> Option<&str> {
         id.split_whitespace().next()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SequencingRead {
+    pub fastq: fastq::Record,
+    pub alignments: Vec<bam::Record>,
+    pub status: MappingStatus,
+}
+
+impl SequencingRead {
+    pub fn new(fastq: fastq::Record) -> Self {
+        SequencingRead {
+            fastq,
+            alignments: Vec::new(),
+            status: MappingStatus::Unknown,
+        }
     }
 }

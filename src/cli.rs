@@ -20,10 +20,22 @@ pub struct CliOptions {
     )]
     pub index: Vec<std::path::PathBuf>,
 
-    #[arg(short, long, default_value = "5000")]
+    #[arg(
+        short = 'o',
+        long,
+        value_name = "FILE",
+        help = "Output folder for all fastq files. Will be created if it doesn't exist.",
+        required = true)]
+    pub output_folder: std::path::PathBuf,
+
+    #[arg(short, long, default_value = "50000")]
     pub batch_size: usize,
 
-    #[arg(short, long, default_value = "1", help = "Number of threads to use. One thread will be reserved for the main program; any extra threads will be used for read mapping.")]
+    #[arg(
+        short,
+        long,
+        default_value = "1",
+        help = "Number of threads to use. One thread will be reserved for the main program; any extra threads will be used for read mapping.")]
     pub threads: usize,
 
     #[arg(long, default_value = "10", help = "Minimum size of a block of bases that will be considered unmapped.")]
@@ -55,6 +67,9 @@ pub fn parse_cli() -> Result<CliOptions> {
     info!(target: "PARAMS", "Index files: {:?}", opts.index);
     info!(target: "PARAMS", "Batch size: {}", opts.batch_size);
     info!(target: "PARAMS", "Threads: {}", opts.threads);
+    info!(target: "PARAMS", "Minimum block size: {}", opts.min_block_size);
+    info!(target: "PARAMS", "Minimum block quality: {}", opts.min_block_quality);
+    info!(target: "PARAMS", "Output folder: {:?}", opts.output_folder);
 
     if opts.threads > 1 {
         opts.threads -= 1;

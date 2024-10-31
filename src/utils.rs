@@ -109,6 +109,37 @@ pub fn block_filter(positions: HashSet<usize>, qual: &[u8], min_block_size: usiz
     filtered_positions
 }
 
+pub trait Slice {
+    fn slice(&self, range: std::ops::Range<usize>) -> Result<Self> where Self: Sized;
+}
+
+impl Slice for fastq::Record {
+    fn slice(&self, range: std::ops::Range<usize>) -> Result<Self> {
+        if range.end > self.seq().len() {
+            return Err(anyhow!("Range exceeds sequence length"));
+        }
+        // Annotate the record description with the slice info
+        let desc = match self.desc() {
+            Some(d) => format!("{}_{}-{}", d, range.start, range.end),
+            None => format!("{}-{}", range.start, range.end),
+        };
+        Ok(fastq::Record::with_attrs(
+            self.id(),
+            Some(&desc),
+            &self.seq()[range.clone()],
+            &self.qual()[range]))
+    }
+}
+
+pub fn fastq_to_unmapped_fragments(record: &fastq::Record, positions: &HashSet<usize>) -> Result<Vec<fastq::Record>> {
+    let blocks = to_blocks(positions.clone());
+    let mut fragments = Vec::new();
+    for block in blocks {
+        fragments.push(record.slice(block.start..block.end)?);
+    }
+    Ok(fragments)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

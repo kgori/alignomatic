@@ -1,8 +1,9 @@
+use crate::cli::CliOptions;
+use crate::utils::block_filter;
 use anyhow::{anyhow, Result};
-use std::collections::HashSet;
 use rust_htslib::bam;
 use rust_htslib::bam::record::Cigar;
-use crate::utils::block_filter;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub enum MappingStatus {
@@ -43,19 +44,19 @@ fn get_clipped_positions(record: &bam::Record) -> Vec<usize> {
     positions
 }
 
+pub fn get_mapping_status(records: &[bam::Record], opts: &CliOptions) -> Result<MappingStatus> {
+    let records: Vec<&bam::Record> = records
+        .iter()
+        .filter(|record| !record.is_unmapped())
+        .collect();
 
-pub fn get_mapping_status(records: &[bam::Record]) -> Result<MappingStatus> {
     if records.is_empty() {
-        return Err(anyhow!("No records to process"));
+        return Ok(MappingStatus::Unmapped);
     }
 
     let read_name = records[0].qname();
     let first_or_second = records[0].is_first_in_template();
     let len = records[0].seq_len();
-
-    if records.iter().all(|record| record.is_unmapped()) {
-        return Ok(MappingStatus::Unmapped);
-    }
 
     let mut positions: HashSet<usize> =
         get_clipped_positions(&records[0]).iter().cloned().collect();
@@ -94,7 +95,12 @@ pub fn get_mapping_status(records: &[bam::Record]) -> Result<MappingStatus> {
     }
 
     // Mark read as partially unmapped if it passes block size and average block quality checks
-    let positions = block_filter(positions, &records[0].qual(), 10, 20.0); // arbitrary values for min block size and quality
+    let positions = block_filter(
+        positions,
+        &records[0].qual(),
+        opts.min_block_size,
+        opts.min_block_quality,
+    ); // arbitrary values for min block size and quality
 
     if positions.is_empty() {
         return Ok(MappingStatus::Mapped);
@@ -102,4 +108,3 @@ pub fn get_mapping_status(records: &[bam::Record]) -> Result<MappingStatus> {
 
     Ok(MappingStatus::PartiallyUnmapped(positions))
 }
-

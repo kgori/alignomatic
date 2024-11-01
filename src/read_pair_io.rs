@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
 use bio::io::fastq::{self, FastqRead};
 use rust_htslib::bam;
-use log::{error, info};
+#[allow(unused_imports)]
+use log::{debug, error, info};
 use niffler;
 use std::fs::File;
 use std::io;
@@ -44,6 +45,7 @@ impl ReadPairIterator {
                 break;
             }
         }
+        debug!("Batch size: {}", batch.len());
         batch
     }
 }
@@ -63,7 +65,7 @@ impl Iterator for ReadPairIterator {
             if let Ok(read_pair) = read_pair {
                 return Some(read_pair);
             } else {
-                error!("Failed to create a read pair: {:?}", read_pair.err());
+                // error!("Failed to create a read pair: {:?}", read_pair.err());
                 return None;
             }
         } else {

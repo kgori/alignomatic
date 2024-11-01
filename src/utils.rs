@@ -30,22 +30,6 @@ where
     Ok(result)
 }
 
-/// Conversion from rust_htslib::bam::Record to bio::io::fastq::Record
-pub fn bam_to_fastq(
-    record: &rust_htslib::bam::Record,
-) -> Result<fastq::Record, Box<dyn std::error::Error>> {
-    let name = std::str::from_utf8(record.qname())?;
-    let desc = None;
-    let seq = record.seq().as_bytes();
-    let qual = record.qual().iter().map(|q| q + 33).collect::<Vec<u8>>();
-    Ok(fastq::Record::with_attrs(name, desc, &seq, &qual))
-}
-
-/// Calculates the average base quality of a record
-pub fn avg_quality(record: &rust_htslib::bam::Record) -> f32 {
-    record.qual().iter().map(|x| *x as f32).sum::<f32>() / record.qual().len() as f32
-}
-
 #[derive(Debug)]
 struct Block {
     /// Represents a contiguous range of positions. The range is inclusive on the start and exclusive on the end.
@@ -143,21 +127,4 @@ pub fn fastq_to_unmapped_fragments(record: &fastq::Record, positions: &HashSet<u
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn test_bam_to_fastq() {
-        let mut bam_rec = rust_htslib::bam::Record::new();
-        bam_rec.set(b"test", None, b"ACGT", &[0, 0, 0, 41]);
-
-        let fastq_rec = fastq::Record::with_attrs("test", None, b"ACGT", b"!!!J");
-
-        assert_eq!(bam_to_fastq(&bam_rec).unwrap(), fastq_rec,);
-    }
-
-    #[test]
-    fn test_avg_quality() {
-        let mut bam_rec = rust_htslib::bam::Record::new();
-        bam_rec.set(b"test", None, b"ACGT", &[10, 12, 15, 45]);
-        assert_eq!(avg_quality(&bam_rec), 20.5);
-    }
 }

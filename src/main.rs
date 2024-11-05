@@ -1,260 +1,223 @@
-use anyhow::{anyhow, Result};
+#![allow(dead_code)]
+#![allow(unused_imports)]
 
-use rust_htslib::bam;
-
+use anyhow::Result;
 use bio::io::fastq;
-
-use bwa::BwaAligner;
-
-use log::{debug, info, warn};
-
+use log::{debug, error, info, warn};
+use rust_htslib::bam;
+use rust_htslib::bam::Read;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
+mod aligner;
 mod cli;
-
 mod mapping_status;
-use mapping_status::{get_mapping_status, MappingStatus};
-
-mod read_pair_io;
-use read_pair_io::{ReadPair, ReadPairIterator};
-
-mod utils;
-use utils::fastq_to_unmapped_fragments;
-use utils::silence_stderr;
-
 mod output;
-use output::OutputWriter;
+mod read_pair_io;
+mod utils;
+
+use aligner::Aligner;
+use mapping_status::{get_mapping_status, MappingStatus, MappingStatus::*};
+use read_pair_io::{MappedReadPair, ReadPairIterator};
+use utils::{bam_to_fastq, create_bgzf_fastq_writer};
 
 fn main() -> Result<()> {
     env_logger::init();
 
     let opts = cli::parse_cli()?;
-    do_work(&opts)?;
+    if opts.output_folder.exists() {
+        warn!(target: "IO", "Output folder {} already exists. Files may be overwritten.", opts.output_folder.display());
+    } else {
+        info!(target: "IO", "Creating output folder {}", opts.output_folder.display());
+        std::fs::create_dir(&opts.output_folder)?;
+    }
+    std::fs::create_dir_all(&opts.output_folder.join("workspace"))?;
+    std::fs::create_dir_all(&opts.output_folder.join("results"))?;
+    let bam_files = generate_alignments(&opts)?;
+    let result = post_process_alignments(&bam_files, &opts);
+    if result.is_ok() {
+        info!(target: "IO", "Finished processing alignments");
+    } else {
+        error!(target: "IO", "Error processing alignments");
+    }
     Ok(())
 }
 
-fn load_aligners(paths: &[std::path::PathBuf]) -> Result<Vec<BwaAligner>> {
-    let mut aligners = Vec::<BwaAligner>::new();
-    for pathbuf in paths.iter() {
-        let aligner = silence_stderr(|| BwaAligner::from_path(pathbuf))??;
-        aligners.push(aligner);
-    }
-    Ok(aligners)
-}
-
-fn do_work(opts: &cli::CliOptions) -> Result<()> {
+fn generate_alignments(opts: &cli::CliOptions) -> Result<Vec<PathBuf>> {
     info!(target: "IO", "Accessing Fastq read pairs from disk");
-    let mut read_pair_iter =
-        ReadPairIterator::new(opts.fastq_first.clone(), opts.fastq_second.clone())?;
 
-    info!(target: "IO", "Creating output folders in {}", opts.output_folder.display());
-    let mut output_writer = OutputWriter::new(opts.output_folder.clone())?;
+    let mut bam_files = Vec::new();
+    let mut fastq1 = opts.fastq_first.clone();
+    let mut fastq2 = opts.fastq_second.clone();
 
-    info!(target: "IO", "Loading BWA indices and creating aligners");
-    let aligners = load_aligners(&opts.index)?;
+    for index in &opts.index {
+        info!(target: "BWA", "Loading BWA index from {}", index.display());
+        let mut read_pair_iter = ReadPairIterator::new(fastq1.clone(), fastq2.clone())?;
 
-    let mut total_alignments: usize = 0;
-    loop {
-        let mut read_pairs = read_pair_iter.batch(opts.batch_size);
-        let n_read_pairs = read_pairs.len();
+        let mut aligner = Aligner::new(&index, &opts.output_folder.join("workspace"))?;
 
-        if n_read_pairs == 0 {
-            break;
-        } else {
-            info!(target: "BWA", "Aligning {} read pairs", read_pairs.len());
-            for aligner in aligners.iter() {
-                align_batch(aligner, &mut read_pairs, &opts)?;
-            }
-            for read_pair in read_pairs {
-                use MappingStatus::*;
-                match (read_pair.read1.status, read_pair.read2.status) {
-                    (Mapped, Mapped) => continue,
+        loop {
+            let read_pairs = read_pair_iter.batch(opts.batch_size);
+            let n_read_pairs = read_pairs.len();
 
-                    (Suspicious, _) | (_, Suspicious) => {
-                        warn!(target: "IO", "E7:Read pair {} has a suspicious alignment", read_pair.id);
-                        continue;
-                    }
-
-                    (Unknown, _) | (_, Unknown) => {
-                        warn!(target: "IO", "E8:Read pair {} has an unknown alignment status", read_pair.id);
-                        continue;
-                    }
-
-                    (Unmapped, Unmapped) => {
-                        output_writer.write("uuu1", &read_pair.read1.fastq)?;
-                        output_writer.write("uuu2", &read_pair.read2.fastq)?;
-                    }
-
-                    (Mapped, Unmapped) => {
-                        output_writer.write("mum1", &read_pair.read1.fastq)?;
-                        output_writer.write("muu2", &read_pair.read2.fastq)?;
-                    }
-
-                    (Unmapped, Mapped) => {
-                        output_writer.write("muu1", &read_pair.read1.fastq)?;
-                        output_writer.write("mum2", &read_pair.read2.fastq)?;
-                    }
-
-                    (Mapped, PartiallyUnmapped(positions)) => {
-                        output_writer.write("mpm1", &read_pair.read1.fastq)?;
-                        output_writer.write("mpp2", &read_pair.read2.fastq)?;
-
-                        let fragments =
-                            fastq_to_unmapped_fragments(&read_pair.read2.fastq, &positions)?;
-                        output_writer.write_batch("frag", &fragments)?;
-                    }
-
-                    (PartiallyUnmapped(positions), Mapped) => {
-                        output_writer.write("mpp1", &read_pair.read1.fastq)?;
-                        output_writer.write("mpm2", &read_pair.read2.fastq)?;
-                        let fragments =
-                            fastq_to_unmapped_fragments(&read_pair.read1.fastq, &positions)?;
-                        output_writer.write_batch("frag", &fragments)?;
-                    }
-
-                    (Unmapped, PartiallyUnmapped(positions)) => {
-                        output_writer.write("upu1", &read_pair.read1.fastq)?;
-                        output_writer.write("upp2", &read_pair.read2.fastq)?;
-                        let fragments =
-                            fastq_to_unmapped_fragments(&read_pair.read2.fastq, &positions)?;
-                        output_writer.write_batch("frag", &fragments)?;
-                    }
-
-                    (PartiallyUnmapped(positions), Unmapped) => {
-                        output_writer.write("upp1", &read_pair.read1.fastq)?;
-                        output_writer.write("upu2", &read_pair.read2.fastq)?;
-                        let fragments =
-                            fastq_to_unmapped_fragments(&read_pair.read1.fastq, &positions)?;
-                        output_writer.write_batch("frag", &fragments)?;
-                    }
-
-                    (PartiallyUnmapped(positions1), PartiallyUnmapped(positions2)) => {
-                        output_writer.write("ppp1", &read_pair.read1.fastq)?;
-                        output_writer.write("ppp2", &read_pair.read2.fastq)?;
-                        let fragments1 =
-                            fastq_to_unmapped_fragments(&read_pair.read1.fastq, &positions1)?;
-                        output_writer.write_batch("frag", &fragments1)?;
-                        let fragments2 =
-                            fastq_to_unmapped_fragments(&read_pair.read2.fastq, &positions2)?;
-                        output_writer.write_batch("frag", &fragments2)?;
-                    }
-                }
+            if n_read_pairs == 0 {
+                break;
+            } else {
+                info!(target: "BWA", "Aligning {} read pairs", read_pairs.len());
+                aligner.process_batch(&read_pairs, &opts)?;
             }
         }
-        total_alignments += n_read_pairs;
-        output_writer.flush()?;
-        info!(target: "PROGRESS", "{} read pairs processed, {} reads written", total_alignments, output_writer.written());
+        bam_files.push(aligner.bamfile().clone());
+        (fastq1, fastq2) = aligner.fastqfiles();
     }
-    info!(target: "SUMMARY", "{} read pairs processed, {} reads written, {} fragments written", total_alignments, output_writer.written(), output_writer.fragments());
-    Ok(())
+
+    Ok(bam_files)
 }
 
-#[derive(Debug)]
-struct MappedReadPair {
-    #[allow(dead_code)]
-    id: String,
-    read1: Vec<bam::Record>,
-    read2: Vec<bam::Record>,
-}
+fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::CliOptions) -> Result<()> {
+    let mut alignments: std::collections::BTreeMap<String, MappedReadPair> =
+        std::collections::BTreeMap::new();
 
-impl MappedReadPair {
-    fn new(id: &str) -> Self {
-        MappedReadPair {
-            id: id.to_string(),
-            read1: Vec::new(),
-            read2: Vec::new(),
+    for bam_file in bam_files {
+        let mut bam = bam::Reader::from_path(bam_file)?;
+        for record in bam.records() {
+            let record = record?;
+            let read_name = String::from_utf8(record.qname().to_vec())?;
+            let mapped_pair = alignments
+                .entry(read_name.clone())
+                .or_insert(MappedReadPair::new(&read_name));
+            mapped_pair.insert(record);
         }
     }
 
-    fn insert(&mut self, read: bam::Record) {
-        if read.is_first_in_template() {
-            self.read1.push(read);
-        } else {
-            self.read2.push(read);
-        }
-    }
-}
+    let mut unmapped_pairs1 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_uu.1.fq.gz"))?;
+    let mut unmapped_pairs2 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_uu.2.fq.gz"))?;
+    let mut mapped_unmapped_pairs1 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_mu.1.fq.gz"))?;
+    let mut mapped_unmapped_pairs2 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_mu.2.fq.gz"))?;
+    let mut unmapped_mapped_pairs1 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_um.1.fq.gz"))?;
+    let mut unmapped_mapped_pairs2 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_um.2.fq.gz"))?;
+    let mut fragmentary_unmapped_pairs1 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_fu.1.fq.gz"))?;
+    let mut fragmentary_unmapped_pairs2 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_fu.2.fq.gz"))?;
+    let mut unmapped_fragmentary_pairs1 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_uf.1.fq.gz"))?;
+    let mut unmapped_fragmentary_pairs2 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_uf.2.fq.gz"))?;
+    let mut fragmentary_mapped_pairs1 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_fm.1.fq.gz"))?;
+    let mut fragmentary_mapped_pairs2 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_fm.2.fq.gz"))?;
+    let mut mapped_fragmentary_pairs1 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_mf.1.fq.gz"))?;
+    let mut mapped_fragmentary_pairs2 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_mf.2.fq.gz"))?;
 
-fn align_batch(
-    aligner: &BwaAligner,
-    read_pairs: &mut [ReadPair],
-    opts: &cli::CliOptions,
-) -> Result<()> {
-    let mut reads = Vec::new();
-    for read_pair in read_pairs.iter() {
-        match (&read_pair.read1.status, &read_pair.read2.status) {
-            (MappingStatus::Mapped, MappingStatus::Mapped) => {
-                continue;
+    let mut fragmentary_pairs1 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_ff.1.fq.gz"))?;
+    let mut fragmentary_pairs2 =
+        create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_ff.2.fq.gz"))?;
+
+    for (id, read_pair) in alignments {
+        let status1 = get_mapping_status(&read_pair.read1, &opts)?;
+        let status2 = get_mapping_status(&read_pair.read2, &opts)?;
+        match (status1, status2) {
+            (Mapped, Mapped) => {
+                ();
             }
-            (MappingStatus::Suspicious, _) | (_, MappingStatus::Suspicious) => {
-                warn!("Read pair {} has a suspicious alignment", read_pair.id);
-                continue;
+            (Unmapped, Unmapped) => {
+                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                unmapped_pairs1.write_record(&f1)?;
+                unmapped_pairs2.write_record(&f2)?;
+            }
+            (Unmapped, Mapped) => {
+                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                unmapped_mapped_pairs1.write_record(&f1)?;
+                unmapped_mapped_pairs2.write_record(&f2)?;
+            }
+            (Mapped, Unmapped) => {
+                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                mapped_unmapped_pairs1.write_record(&f1)?;
+                mapped_unmapped_pairs2.write_record(&f2)?;
+            }
+            (Fragmentary(_), Unmapped) => {
+                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                fragmentary_unmapped_pairs1.write_record(&f1)?;
+                fragmentary_unmapped_pairs2.write_record(&f2)?;
+            }
+            (Unmapped, Fragmentary(_)) => {
+                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                unmapped_fragmentary_pairs1.write_record(&f1)?;
+                unmapped_fragmentary_pairs2.write_record(&f2)?;
+            }
+            (Fragmentary(_), Mapped) => {
+                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                fragmentary_mapped_pairs1.write_record(&f1)?;
+                fragmentary_mapped_pairs2.write_record(&f2)?;
+            }
+            (Mapped, Fragmentary(_)) => {
+                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                mapped_fragmentary_pairs1.write_record(&f1)?;
+                mapped_fragmentary_pairs2.write_record(&f2)?;
+            }
+            (Fragmentary(_), Fragmentary(_)) => {
+                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                fragmentary_pairs1.write_record(&f1)?;
+                fragmentary_pairs2.write_record(&f2)?;
+            }
+            (Suspicious, _) | (_, Suspicious) => {
+                error!("Suspicious read mapping: {}", id);
             }
             _ => {
-                reads.push(read_pair.read1.fastq.clone());
-                reads.push(read_pair.read2.fastq.clone());
+                error!("Unknown read mapping: {}", id);
             }
-        }
-    }
-    let alignments = align_reads(aligner, &reads, opts.threads.clone())?;
-
-    for input_pair in read_pairs {
-        let id = &input_pair.id;
-        if alignments.contains_key(id) {
-            let mapped_pair = alignments.get(id).unwrap();
-            for record in mapped_pair.read1.iter() {
-                input_pair.read1.alignments.push(record.clone());
-            }
-            for record in mapped_pair.read2.iter() {
-                input_pair.read2.alignments.push(record.clone());
-            }
-            input_pair.read1.status = get_mapping_status(&input_pair.read1.alignments, &opts)?;
-            input_pair.read2.status = get_mapping_status(&input_pair.read2.alignments, &opts)?;
         }
     }
 
     Ok(())
 }
 
-fn align_reads(
-    aligner: &BwaAligner,
-    reads: &[fastq::Record],
-    threads: usize,
-) -> Result<BTreeMap<String, MappedReadPair>> {
-    debug!(target: "BWA", "Aligning {} reads", reads.len());
-    let mut alignments = BTreeMap::new();
-    let bwa_result = silence_stderr(|| aligner.align_fastq_records(&reads, true, true, threads))??;
-
-    {
-        // debugging
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis();
-
-        let filename = format!("debug_{}.bam", timestamp);
-        debug!("Writing BAM file: {}", filename);
-        let header = aligner.create_bam_header();
-        let mut writer = bam::Writer::from_path(&filename, &header, bam::Format::Bam)?;
-        for aln in bwa_result.iter() {
-            writer.write(aln)?;
+fn convert_bam_to_fastq(alignments: &[bam::Record]) -> Result<fastq::Record> {
+    let mut fastqs = Vec::new();
+    for alignment in alignments.iter() {
+        if alignment.is_secondary() || alignment.is_supplementary() {
+            continue;
+        }
+        fastqs.push(bam_to_fastq(alignment.clone())?);
+    }
+    match fastqs.len() {
+        0 => Err(anyhow::anyhow!("No primary alignments")),
+        1 => Ok(fastqs[0].clone()),
+        2.. => {
+            let read1_id = fastqs[0].id();
+            let read1_seq = fastqs[0].seq();
+            let read1_qual = fastqs[0].qual();
+            for fastq in fastqs.iter().skip(1) {
+                if read1_id != fastq.id() {
+                    return Err(anyhow::anyhow!("Read IDs do not match"));
+                }
+                if read1_seq != fastq.seq() {
+                    return Err(anyhow::anyhow!("Read sequences do not match"));
+                }
+                if read1_qual != fastq.qual() {
+                    return Err(anyhow::anyhow!("Read qualities do not match"));
+                }
+            }
+            Ok(fastqs[0].clone())
         }
     }
-    bwa_result.into_iter().for_each(|r| {
-        let name = std::str::from_utf8(r.qname())
-            .expect("Invalid UTF-8 in read name")
-            .to_string();
-        alignments
-            .entry(name.clone())
-            .or_insert_with(|| MappedReadPair::new(&name))
-            .insert(r);
-    });
-
-    if alignments.len() == 0 {
-        return Err(anyhow!("No alignments were generated"));
-    }
-
-    Ok(alignments)
 }

@@ -1,7 +1,8 @@
-use clap::Parser;
 use anyhow::{anyhow, Result};
+use clap::Parser;
 #[allow(unused_imports)]
 use log::{debug, info, warn};
+use crate::utils::check_file_exists;
 
 #[derive(Parser)]
 pub struct CliOptions {
@@ -25,7 +26,8 @@ pub struct CliOptions {
         long,
         value_name = "FILE",
         help = "Output folder for all fastq files. Will be created if it doesn't exist.",
-        required = true)]
+        required = true
+    )]
     pub output_folder: std::path::PathBuf,
 
     #[arg(short, long, default_value = "66666")]
@@ -35,13 +37,22 @@ pub struct CliOptions {
         short,
         long,
         default_value = "1",
-        help = "Number of threads to use. One thread will be reserved for the main program; any extra threads will be used for read mapping.")]
+        help = "Number of threads to use. One thread will be reserved for the main program; any extra threads will be used for read mapping."
+    )]
     pub threads: usize,
 
-    #[arg(long, default_value = "30", help = "Minimum size of a block of bases that will be considered unmapped.")]
+    #[arg(
+        long,
+        default_value = "30",
+        help = "Minimum size of a block of bases that will be considered unmapped."
+    )]
     pub min_block_size: usize,
 
-    #[arg(long, default_value = "10", help = "Minimum average base quality of a block of bases that will be considered unmapped.")]
+    #[arg(
+        long,
+        default_value = "10",
+        help = "Minimum average base quality of a block of bases that will be considered unmapped."
+    )]
     pub min_block_quality: f32,
 }
 
@@ -52,7 +63,18 @@ pub fn parse_cli() -> Result<CliOptions> {
     check_file_exists(&opts.fastq_second)?;
     opts.index
         .iter()
-        .try_for_each(|index| check_file_exists(index))?;
+        .try_for_each(|reference_file| -> Result<()> {
+            check_file_exists(reference_file)?;
+            for bwa_extension in &["amb", "ann", "bwt", "pac", "sa"] {
+                let index_file = std::path::PathBuf::from(format!(
+                    "{}.{}",
+                    reference_file.to_string_lossy(),
+                    bwa_extension
+                ));
+                check_file_exists(&index_file)?;
+            }
+            Ok(())
+        })?;
 
     if opts.batch_size < 1 {
         return Err(anyhow!("Batch size must be greater than 0"));
@@ -89,10 +111,3 @@ pub fn parse_cli() -> Result<CliOptions> {
     Ok(opts)
 }
 
-fn check_file_exists(file: &std::path::PathBuf) -> Result<()> {
-    let existence = file.try_exists();
-    match existence {
-        Ok(true) => Ok(()),
-        _ => Err(anyhow!("File not found: {}", file.to_string_lossy())),
-    }
-}

@@ -9,7 +9,7 @@ use std::collections::HashSet;
 pub enum MappingStatus {
     Mapped, // All positions map to the reference (indels + mismatches permitted, also split/supplementary reads are merged)
     Unmapped, // Read is designated unmapped by the mapper
-    PartiallyUnmapped(HashSet<usize>), // Some positions map, while others are clipped
+    Fragmentary(HashSet<usize>), // Some positions map, while others are clipped
     Suspicious, // All positions are unmapped, but the mapper didn't designate it as unmapped
     Unknown, // Reads have not been aligned yet, or other ambiguous status
 }
@@ -106,5 +106,5 @@ pub fn get_mapping_status(records: &[bam::Record], opts: &CliOptions) -> Result<
         return Ok(MappingStatus::Mapped);
     }
 
-    Ok(MappingStatus::PartiallyUnmapped(positions))
+    Ok(MappingStatus::Fragmentary(positions))
 }

@@ -1,22 +1,16 @@
 use anyhow::{anyhow, Result};
-use bgzf::Writer as BgzfWriter;
 use bio::io::fastq;
 use std::collections::HashMap;
+use crate::utils::{create_bgzf_fastq_writer, FastqWriter};
 
-type FileHandle = fastq::Writer<BgzfWriter<std::fs::File>>;
 
 pub struct OutputWriter {
     base_dir: std::path::PathBuf,
-    files: HashMap<String, FileHandle>,
+    files: HashMap<String, FastqWriter>,
     written_count: usize,
     fragment_count: usize,
 }
 
-fn create_bgzf_fastq_writer(path: &std::path::Path) -> Result<FileHandle> {
-    let file = std::fs::File::create(path)?;
-    let bgzf_writer = BgzfWriter::new(file, 6.try_into()?);
-    Ok(fastq::Writer::new(bgzf_writer))
-}
 
 impl OutputWriter {
     pub fn new(base_dir: std::path::PathBuf) -> Result<Self> {

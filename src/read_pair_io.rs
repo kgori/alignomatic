@@ -1,12 +1,12 @@
+use crate::mapping_status::MappingStatus;
 use anyhow::{anyhow, Result};
 use bio::io::fastq::{self, FastqRead};
-use rust_htslib::bam;
 #[allow(unused_imports)]
 use log::{debug, error, info};
 use niffler;
+use rust_htslib::bam;
 use std::fs::File;
 use std::io;
-use crate::mapping_status::MappingStatus;
 
 /// ReadPairIterator handles reading input from paired fastq files.
 /// API summary:
@@ -45,7 +45,6 @@ impl ReadPairIterator {
                 break;
             }
         }
-        debug!("Batch size: {}", batch.len());
         batch
     }
 }
@@ -77,26 +76,24 @@ impl Iterator for ReadPairIterator {
 #[derive(Debug)]
 pub struct ReadPair {
     pub id: String,
-    pub read1: SequencingRead,
-    pub read2: SequencingRead,
+    pub read1: fastq::Record,
+    pub read2: fastq::Record,
 }
 
 impl ReadPair {
     pub fn new(read1: fastq::Record, read2: fastq::Record) -> Result<Self> {
-        if Self::strip_comment(read1.id()) != Self::strip_comment(read2.id()) {
-            info!("Read 1 = {:?}", read1);
-            info!("Read 2 = {:?}", read2);
+        let read1_id = Self::strip_comment(read1.id());
+        if read1_id != Self::strip_comment(read2.id()) {
             return Err(anyhow!(
                 "Read IDs do not match: {} != {}",
                 read1.id(),
                 read2.id()
             ));
         }
-        if let Some(id) = Self::strip_comment(read1.id()) {
+        if let Some(id) = read1_id {
             let id = id.to_string();
-            let read1 = SequencingRead::new(read1);
-            let read2 = SequencingRead::new(read2);
-            return Ok(Self { id, read1, read2 });
+            let read_pair = Self { id, read1, read2 };
+            return Ok(read_pair);
         }
         Err(anyhow!("Read IDs are empty"))
     }
@@ -120,6 +117,32 @@ impl SequencingRead {
             fastq,
             alignments: Vec::new(),
             status: MappingStatus::Unknown,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct MappedReadPair {
+    #[allow(dead_code)]
+    id: String,
+    pub read1: Vec<bam::Record>,
+    pub read2: Vec<bam::Record>,
+}
+
+impl MappedReadPair {
+    pub fn new(id: &str) -> Self {
+        MappedReadPair {
+            id: id.to_string(),
+            read1: Vec::new(),
+            read2: Vec::new(),
+        }
+    }
+
+    pub fn insert(&mut self, read: bam::Record) {
+        if read.is_first_in_template() {
+            self.read1.push(read);
+        } else {
+            self.read2.push(read);
         }
     }
 }

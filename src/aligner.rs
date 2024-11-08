@@ -45,7 +45,7 @@ fn process_filename(filename: &PathBuf) -> Result<PathBuf> {
 }
 
 impl Aligner {
-    pub fn new(reference: &PathBuf, output_dir: &PathBuf) -> Result<Self> {
+    pub fn new(reference: &PathBuf, output_dir: &PathBuf, writing_threads: Option<usize>) -> Result<Self> {
         check_file_exists(&reference)?;
         check_directory_exists(&output_dir)?;
         let aligner = silence_stderr(|| BwaAligner::from_path(&reference))??;
@@ -54,7 +54,10 @@ impl Aligner {
         let bam_filename = output_dir
             .join(output_filename.clone())
             .with_extension("bam");
-        let bam_writer = bam::Writer::from_path(&bam_filename, &header, bam::Format::Bam)?;
+        let mut bam_writer = bam::Writer::from_path(&bam_filename, &header, bam::Format::Bam)?;
+        if let Some(threads) = writing_threads {
+            bam_writer.set_threads(threads)?;
+        }
         let fastq_filename_1 = output_dir
             .join(output_filename.clone())
             .with_extension("1.fastq.gz");
@@ -84,7 +87,6 @@ impl Aligner {
     pub fn fastqfiles(&self) -> (PathBuf, PathBuf) {
         (self.fastq_filename_1.clone(), self.fastq_filename_2.clone())
     }
-
     
     pub fn process_batch(&mut self, read_pairs: &[ReadPair], opts: &cli::CliOptions) -> Result<()> {
         let mut reads = Vec::<fastq::Record>::new();
@@ -95,7 +97,6 @@ impl Aligner {
         }
 
         let alignments = self.align_reads(&reads, opts.threads)?;
-        self.bam_writer.set_threads(opts.threads)?;
 
         let mut bam_write_count: usize = 0;
         let mut fastq_write_count: usize = 0;

@@ -35,7 +35,7 @@ fn get_clipped_positions(record: &bam::Record) -> Vec<usize> {
                 positions.extend(pos..pos + *len as usize);
                 pos += *len as usize;
             }
-            Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
+            Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) | Cigar::Ins(len) => {
                 pos += *len as usize;
             }
             _ => {}

@@ -5,9 +5,8 @@ edition = "2021"
 
 [dependencies]
 bio = ">=2.0.0"
-minimap2 = { version = "0.1.20", features = ["htslib", "simde"] }
 num_cpus = "1.16.0"
-rust-htslib = { version = "0.47.0", default-features = false }
+rust-htslib = { version = ">=0.47.0", default-features = false }
 bwa = { git = "https://github.com/kgori/rust-bwa.git", branch = "dev" }
 clap = { version = "4.5.20", features = ["derive"] }
 anyhow = "1.0.89"

@@ -1,16 +1,22 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 #[allow(unused_imports)]
 use log::{debug, info, warn};
 use crate::utils::check_file_exists;
 
 #[derive(Parser)]
-pub struct CliOptions {
+struct CliOptions {
+    /// Optional path to a config file (TOML format)
+    #[arg(long)]
+    config: Option<PathBuf>,
+    
     #[arg(short = '1', long, value_name = "FILE")]
-    pub fastq_first: std::path::PathBuf,
+    fastq_first: Option<PathBuf>,
 
     #[arg(short = '2', long, value_name = "FILE")]
-    pub fastq_second: std::path::PathBuf,
+    fastq_second: Option<PathBuf>,
 
     #[arg(
         short = 'i',
@@ -19,7 +25,7 @@ pub struct CliOptions {
         value_delimiter = ',',
         help = "Reference files to map against. Must be Fasta format, and must have set of BWA index files."
     )]
-    pub index: Vec<std::path::PathBuf>,
+    index: Option<Vec<PathBuf>>,
 
     #[arg(
         short = 'o',
@@ -28,37 +34,82 @@ pub struct CliOptions {
         help = "Output folder for all fastq files. Will be created if it doesn't exist.",
         required = true
     )]
-    pub output_folder: std::path::PathBuf,
+    output_folder: Option<PathBuf>,
 
-    #[arg(short, long, default_value = "66666")]
-    pub batch_size: usize,
+    #[arg(short, long)]
+    batch_size: Option<usize>,
 
     #[arg(
         short,
         long,
-        default_value = "1",
         help = "Number of threads to use. One thread will be reserved for the main program; any extra threads will be used for read mapping."
     )]
-    pub threads: usize,
+    threads: Option<usize>,
 
     #[arg(
         long,
-        default_value = "30",
         help = "Minimum size of a block of bases that will be considered unmapped."
     )]
-    pub min_block_size: usize,
+    min_block_size: Option<usize>,
 
     #[arg(
         long,
-        default_value = "10",
         help = "Minimum average base quality of a block of bases that will be considered unmapped."
     )]
+    min_block_quality: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ConfigFileOptions {
+    fastq_first: Option<PathBuf>,
+    fastq_second: Option<PathBuf>,
+    index: Option<Vec<PathBuf>>,
+    output_folder: Option<PathBuf>,
+    batch_size: Option<usize>,
+    threads: Option<usize>,
+    min_block_size: Option<usize>,
+    min_block_quality: Option<f32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProgramOptions {
+    pub fastq_first: PathBuf,
+    pub fastq_second: PathBuf,
+    pub index: Vec<PathBuf>,
+    pub output_folder: PathBuf,
+    pub batch_size: usize,
+    pub threads: usize,
+    pub min_block_size: usize,
     pub min_block_quality: f32,
 }
 
-pub fn parse_cli() -> Result<CliOptions> {
-    let mut opts = CliOptions::parse();
+fn load_config(path: &PathBuf) -> ConfigFileOptions {
+    let content = std::fs::read_to_string(path).expect("Failed to read config file");
+    toml::from_str(&content).expect("Failed to parse config file")
+}
 
+fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> ProgramOptions {
+    ProgramOptions {
+        fastq_first: cli.fastq_first.or(config.fastq_first).expect("No first fastq file provided"),
+        fastq_second: cli.fastq_second.or(config.fastq_second).expect("No second fastq file provided"),
+        index: cli.index.or(config.index).expect("No index files provided"),
+        output_folder: cli.output_folder.or(config.output_folder).expect("No output folder provided"),
+        batch_size: cli.batch_size.or(config.batch_size).unwrap_or(66666),
+        threads: cli.threads.or(config.threads).unwrap_or(1),
+        min_block_size: cli.min_block_size.or(config.min_block_size).unwrap_or(30),
+        min_block_quality: cli.min_block_quality.or(config.min_block_quality).unwrap_or(10.0),
+    }
+}
+
+fn write_config(config: &ProgramOptions) -> Result<()> {
+    let toml_str = toml::to_string_pretty(config)?;
+    let path = config.output_folder.join("config").with_extension("toml");
+    std::fs::write(&path, toml_str)?;
+    info!(target: "PARAMS", "Wrote config file to {:?}", path);
+    Ok(())
+}
+
+fn check_options(opts: &ProgramOptions) -> Result<()> {
     check_file_exists(&opts.fastq_first)?;
     check_file_exists(&opts.fastq_second)?;
     opts.index
@@ -66,7 +117,7 @@ pub fn parse_cli() -> Result<CliOptions> {
         .try_for_each(|reference_file| -> Result<()> {
             check_file_exists(reference_file)?;
             for bwa_extension in &["amb", "ann", "bwt", "pac", "sa"] {
-                let index_file = std::path::PathBuf::from(format!(
+                let index_file = PathBuf::from(format!(
                     "{}.{}",
                     reference_file.to_string_lossy(),
                     bwa_extension
@@ -104,10 +155,30 @@ pub fn parse_cli() -> Result<CliOptions> {
     info!(target: "PARAMS", "Minimum block quality: {}", opts.min_block_quality);
     info!(target: "PARAMS", "Output folder: {:?}", opts.output_folder);
 
-    if opts.threads > 1 {
-        opts.threads -= 1;
-    }
-
-    Ok(opts)
+    Ok(())
 }
 
+fn create_output_folder(opts: &ProgramOptions) -> Result<()> {
+    if opts.output_folder.exists() {
+        warn!(target: "IO", "Output folder {} already exists. Files may be overwritten.", opts.output_folder.display());
+    } else {
+        info!(target: "IO", "Creating output folder {}", opts.output_folder.display());
+        std::fs::create_dir(&opts.output_folder)?;
+    }
+
+    let workspace = opts.output_folder.join("workspace");
+    let results = opts.output_folder.join("results");
+    std::fs::create_dir_all(workspace)?;
+    std::fs::create_dir_all(results)?;
+    Ok(())
+}
+
+pub fn get_program_options() -> Result<ProgramOptions> {
+    let cli_opts = CliOptions::parse();
+    let config_opts = cli_opts.config.as_ref().map(load_config).unwrap_or_default();
+    let final_opts = merge_options(cli_opts, config_opts);
+    check_options(&final_opts)?;
+    create_output_folder(&final_opts)?;
+    write_config(&final_opts)?;
+    Ok(final_opts)
+}

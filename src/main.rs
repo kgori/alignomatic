@@ -1,15 +1,14 @@
 #![allow(dead_code)]
-#![allow(unused_imports)]
 
 use anyhow::Result;
 use bio::io::fastq;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use rust_htslib::bam;
-use rust_htslib::bam::Read;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 mod aligner;
+mod bam_io;
+mod checkpoint;
 mod cli;
 mod mapping_status;
 mod output;
@@ -17,22 +16,15 @@ mod read_pair_io;
 mod utils;
 
 use aligner::Aligner;
-use mapping_status::{get_mapping_status, MappingStatus, MappingStatus::*};
+use mapping_status::{get_mapping_status, MappingStatus::*};
 use read_pair_io::{MappedReadPair, ReadPairIterator};
 use utils::{bam_to_fastq, create_bgzf_fastq_writer};
 
 fn main() -> Result<()> {
     env_logger::init();
 
-    let opts = cli::parse_cli()?;
-    if opts.output_folder.exists() {
-        warn!(target: "IO", "Output folder {} already exists. Files may be overwritten.", opts.output_folder.display());
-    } else {
-        info!(target: "IO", "Creating output folder {}", opts.output_folder.display());
-        std::fs::create_dir(&opts.output_folder)?;
-    }
-    std::fs::create_dir_all(&opts.output_folder.join("workspace"))?;
-    std::fs::create_dir_all(&opts.output_folder.join("results"))?;
+    let opts: cli::ProgramOptions = cli::get_program_options()?;
+
     let bam_files = generate_alignments(&opts)?;
     let result = post_process_alignments(&bam_files, &opts);
     if result.is_ok() {
@@ -40,32 +32,90 @@ fn main() -> Result<()> {
     } else {
         error!(target: "IO", "Error processing alignments");
     }
+
     Ok(())
 }
 
-fn generate_alignments(opts: &cli::CliOptions) -> Result<Vec<PathBuf>> {
+fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
     info!(target: "IO", "Accessing Fastq read pairs from disk");
 
     let mut bam_files = Vec::new();
     let mut fastq1 = opts.fastq_first.clone();
     let mut fastq2 = opts.fastq_second.clone();
 
+    let workspace = opts.output_folder.join("workspace");
+
     for index in &opts.index {
         info!(target: "BWA", "Loading BWA index from {}", index.display());
         let mut read_pair_iter = ReadPairIterator::new(fastq1.clone(), fastq2.clone())?;
 
-        let mut aligner = Aligner::new(&index, &opts.output_folder.join("workspace"))?;
+        let mut aligner = Aligner::new(
+            &index,
+            &workspace,
+            Some(opts.threads),
+        )?;
+        debug!(target: "Aligner", "Created aligner from {}", index.display());
+        let mut n_readpairs_processed: usize = 0;
 
-        loop {
-            let read_pairs = read_pair_iter.batch(opts.batch_size);
-            let n_read_pairs = read_pairs.len();
+        // CHECKPOINTING:
+        // Look for presence of a checkpoint file
+        //   if found:
+        //     1 - compute the checkpoint hash for the current inputs (ref infq1 infq2 bam outfq1 outfq2)
+        //     2 - compare the checkpoint hash with the one in the checkpoint file
+        //     3 - if they match, skip the loop and continue with the next index
+        //   otherwise:
+        //     1 - Do checkpoint hashing work in background
+        //     2 - run the loop
+        //     3 - write the checkpoint file with the hash data
+        let mut do_work = true;
+        let checkpoint_file = workspace.join(index.file_name().unwrap()).with_extension("checkpoint.json");
+        
+        if checkpoint_file.exists() {
+            let checkpoint_on_disk = checkpoint::read_checkpoint(&checkpoint_file)?;
+            let (fq1, fq2) = aligner.fastqfiles();
+            let checkpoint_computed = checkpoint::Checkpoint::create(
+                index,
+                &fastq1,
+                &fastq2,
+                &aligner.bamfile(),
+                &fq1,
+                &fq2,
+            )?;
 
-            if n_read_pairs == 0 {
-                break;
-            } else {
-                info!(target: "BWA", "Aligning {} read pairs", read_pairs.len());
-                aligner.process_batch(&read_pairs, &opts)?;
+            if checkpoint_on_disk.matches(&checkpoint_computed) {
+                do_work = false;
             }
+        }
+
+        if do_work {
+            loop {
+                let read_pairs = read_pair_iter.batch(opts.batch_size);
+                let n_read_pairs = read_pairs.len();
+
+                if n_read_pairs == 0 {
+                    break;
+                } else {
+                    info!(target: "BWA", "Aligning {} read pairs", read_pairs.len());
+                    aligner.process_batch(&read_pairs, &opts)?;
+                    n_readpairs_processed += n_read_pairs;
+                    info!(target: "BWA", "{} read pairs processed", n_readpairs_processed);
+                }
+            }
+
+            // Write checkpoint file
+            let (fq1, fq2) = aligner.fastqfiles();
+            let ckpt = checkpoint::Checkpoint::create(
+                index,
+                &fastq1,
+                &fastq2,
+                &aligner.bamfile(),
+                &fq1,
+                &fq2,
+            )?;
+            checkpoint::write_checkpoint(&ckpt, &checkpoint_file)?;
+        }
+        else {
+            info!(target: "Checkpoint", "Alignment for index {} is already computed", index.display());
         }
         bam_files.push(aligner.bamfile().clone());
         (fastq1, fastq2) = aligner.fastqfiles();
@@ -74,22 +124,19 @@ fn generate_alignments(opts: &cli::CliOptions) -> Result<Vec<PathBuf>> {
     Ok(bam_files)
 }
 
-fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::CliOptions) -> Result<()> {
-    let mut alignments: std::collections::BTreeMap<String, MappedReadPair> =
-        std::collections::BTreeMap::new();
+fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions) -> Result<()> {
 
-    for bam_file in bam_files {
-        let mut bam = bam::Reader::from_path(bam_file)?;
-        for record in bam.records() {
-            let record = record?;
-            let read_name = String::from_utf8(record.qname().to_vec())?;
-            let mapped_pair = alignments
-                .entry(read_name.clone())
-                .or_insert(MappedReadPair::new(&read_name));
-            mapped_pair.insert(record);
-        }
-    }
+    let final_bamfile = bam_files.last().unwrap();
+    let mut final_bam =
+        bam_io::BufferedBamReader::new(bam::Reader::from_path(final_bamfile).unwrap());
 
+    let mut bam_readers = bam_files
+        .iter()
+        .take(bam_files.len() - 1)
+        .map(|bamfile| bam_io::BufferedBamReader::new(bam::Reader::from_path(bamfile).unwrap()))
+        .collect::<Vec<_>>();
+
+    info!(target: "IO", "Writing results to fastq files in {}", opts.output_folder.join("results").display());
     let mut unmapped_pairs1 =
         create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_uu.1.fq.gz"))?;
     let mut unmapped_pairs2 =
@@ -124,66 +171,125 @@ fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::CliOptions) -> Res
     let mut fragmentary_pairs2 =
         create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_ff.2.fq.gz"))?;
 
-    for (id, read_pair) in alignments {
-        let status1 = get_mapping_status(&read_pair.read1, &opts)?;
-        let status2 = get_mapping_status(&read_pair.read2, &opts)?;
-        match (status1, status2) {
-            (Mapped, Mapped) => {
-                ();
+    while let Ok(batch) = final_bam.take_n_qnames(opts.batch_size) {
+        if batch.is_empty() {
+            break;
+        }
+
+        let mut alignments: std::collections::BTreeMap<String, MappedReadPair> =
+            std::collections::BTreeMap::new();
+        let end_of_batch = String::from_utf8(batch.last().unwrap().qname().to_vec())?;
+
+        for record in batch {
+            let read_name = String::from_utf8(record.qname().to_vec())?;
+            let mapped_pair = alignments
+                .entry(read_name.clone())
+                .or_insert(MappedReadPair::new(&read_name));
+            mapped_pair.insert(record);
+        }
+
+
+        for bam_reader in bam_readers.iter_mut() {
+
+            // This is a run-time check. All read pairs from the final bam file should be
+            // present in all other bam files. If not, it's an error. This checks both read1
+            // and read2.
+            let mut check_map_read1: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+            let mut check_map_read2: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+            for key in alignments.keys() {
+                check_map_read1.insert(key.clone(), false);
+                check_map_read2.insert(key.clone(), false);
             }
-            (Unmapped, Unmapped) => {
-                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
-                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
-                unmapped_pairs1.write_record(&f1)?;
-                unmapped_pairs2.write_record(&f2)?;
+
+            let batch = bam_reader.take_until_qname(&end_of_batch)?;
+            for record in batch {
+                let read_name = String::from_utf8(record.qname().to_vec())?;
+                if let Some(mapped_pair) = alignments.get_mut(&read_name) {
+                    if record.is_first_in_template() {
+                        check_map_read1.insert(read_name, true); // Mark as found
+                    } else {
+                        check_map_read2.insert(read_name, true); // Mark as found
+                    }
+                    mapped_pair.insert(record);
+                }
             }
-            (Unmapped, Mapped) => {
-                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
-                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
-                unmapped_mapped_pairs1.write_record(&f1)?;
-                unmapped_mapped_pairs2.write_record(&f2)?;
+
+            // Every key should be found, no exceptions.
+            for (key, value) in check_map_read1.iter() {
+                if !value {
+                    return Err(anyhow::anyhow!("Read 1 of pair {} not found in all bam files", key));
+                }
             }
-            (Mapped, Unmapped) => {
-                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
-                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
-                mapped_unmapped_pairs1.write_record(&f1)?;
-                mapped_unmapped_pairs2.write_record(&f2)?;
+
+            for (key, value) in check_map_read2.iter() {
+                if !value {
+                    return Err(anyhow::anyhow!("Read 2 of pair {} not found in all bam files", key));
+                }
             }
-            (Fragmentary(_), Unmapped) => {
-                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
-                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
-                fragmentary_unmapped_pairs1.write_record(&f1)?;
-                fragmentary_unmapped_pairs2.write_record(&f2)?;
-            }
-            (Unmapped, Fragmentary(_)) => {
-                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
-                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
-                unmapped_fragmentary_pairs1.write_record(&f1)?;
-                unmapped_fragmentary_pairs2.write_record(&f2)?;
-            }
-            (Fragmentary(_), Mapped) => {
-                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
-                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
-                fragmentary_mapped_pairs1.write_record(&f1)?;
-                fragmentary_mapped_pairs2.write_record(&f2)?;
-            }
-            (Mapped, Fragmentary(_)) => {
-                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
-                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
-                mapped_fragmentary_pairs1.write_record(&f1)?;
-                mapped_fragmentary_pairs2.write_record(&f2)?;
-            }
-            (Fragmentary(_), Fragmentary(_)) => {
-                let f1 = convert_bam_to_fastq(&read_pair.read1)?;
-                let f2 = convert_bam_to_fastq(&read_pair.read2)?;
-                fragmentary_pairs1.write_record(&f1)?;
-                fragmentary_pairs2.write_record(&f2)?;
-            }
-            (Suspicious, _) | (_, Suspicious) => {
-                error!("Suspicious read mapping: {}", id);
-            }
-            _ => {
-                error!("Unknown read mapping: {}", id);
+        }
+
+
+        for (id, read_pair) in alignments {
+            let status1 = get_mapping_status(&read_pair.read1, &opts)?;
+            let status2 = get_mapping_status(&read_pair.read2, &opts)?;
+            match (status1, status2) {
+                (Mapped, Mapped) => {
+                    ();
+                }
+                (Unmapped, Unmapped) => {
+                    let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                    let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                    unmapped_pairs1.write_record(&f1)?;
+                    unmapped_pairs2.write_record(&f2)?;
+                }
+                (Unmapped, Mapped) => {
+                    let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                    let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                    unmapped_mapped_pairs1.write_record(&f1)?;
+                    unmapped_mapped_pairs2.write_record(&f2)?;
+                }
+                (Mapped, Unmapped) => {
+                    let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                    let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                    mapped_unmapped_pairs1.write_record(&f1)?;
+                    mapped_unmapped_pairs2.write_record(&f2)?;
+                }
+                (Fragmentary(_), Unmapped) => {
+                    let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                    let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                    fragmentary_unmapped_pairs1.write_record(&f1)?;
+                    fragmentary_unmapped_pairs2.write_record(&f2)?;
+                }
+                (Unmapped, Fragmentary(_)) => {
+                    let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                    let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                    unmapped_fragmentary_pairs1.write_record(&f1)?;
+                    unmapped_fragmentary_pairs2.write_record(&f2)?;
+                }
+                (Fragmentary(_), Mapped) => {
+                    let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                    let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                    fragmentary_mapped_pairs1.write_record(&f1)?;
+                    fragmentary_mapped_pairs2.write_record(&f2)?;
+                }
+                (Mapped, Fragmentary(_)) => {
+                    let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                    let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                    mapped_fragmentary_pairs1.write_record(&f1)?;
+                    mapped_fragmentary_pairs2.write_record(&f2)?;
+                }
+                (Fragmentary(_), Fragmentary(_)) => {
+                    let f1 = convert_bam_to_fastq(&read_pair.read1)?;
+                    let f2 = convert_bam_to_fastq(&read_pair.read2)?;
+                    fragmentary_pairs1.write_record(&f1)?;
+                    fragmentary_pairs2.write_record(&f2)?;
+                }
+                (Suspicious, _) | (_, Suspicious) => {
+                    error!("Suspicious read mapping: {}", id);
+                }
+                _ => {
+                    error!("Unknown read mapping: {}", id);
+                }
             }
         }
     }

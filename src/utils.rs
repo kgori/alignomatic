@@ -190,8 +190,8 @@ pub fn bam_to_fastq(record: bam::Record) -> Result<fastq::Record> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::read_pair_io::{ReadPair, ReadPairIterator};
-    use rust_htslib::bam::{Read, Reader};
+    use crate::read_pair_io::ReadPairIterator;
+    use rust_htslib::bam::Read;
 
     #[test]
     fn test_bam_to_fastq() {

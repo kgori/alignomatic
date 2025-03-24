@@ -1,4 +1,4 @@
-use crate::cli::CliOptions;
+use crate::cli::ProgramOptions;
 use crate::utils::block_filter;
 use anyhow::{anyhow, Result};
 use rust_htslib::bam;
@@ -44,7 +44,7 @@ fn get_clipped_positions(record: &bam::Record) -> Vec<usize> {
     positions
 }
 
-pub fn get_mapping_status(records: &[bam::Record], opts: &CliOptions) -> Result<MappingStatus> {
+pub fn get_mapping_status(records: &[bam::Record], opts: &ProgramOptions) -> Result<MappingStatus> {
     let records: Vec<&bam::Record> = records
         .iter()
         .filter(|record| !record.is_unmapped())

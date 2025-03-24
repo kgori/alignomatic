@@ -1,5 +1,3 @@
-#![allow(unused_imports)]
-#![allow(unused_variables)]
 use crate::cli;
 use crate::mapping_status::get_mapping_status;
 use crate::mapping_status::MappingStatus::*;
@@ -11,7 +9,7 @@ use crate::utils::{
 use anyhow::{anyhow, Result};
 use bio::io::fastq;
 use bwa::BwaAligner;
-use log::{debug, info, warn};
+use log::{debug, warn};
 use rust_htslib::bam;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,7 +45,9 @@ fn process_filename(filename: &PathBuf) -> Result<PathBuf> {
 impl Aligner {
     pub fn new(reference: &PathBuf, output_dir: &PathBuf, writing_threads: Option<usize>) -> Result<Self> {
         check_file_exists(&reference)?;
+        debug!(target: "Aligner", "Reference file exists: {}", reference.display());
         check_directory_exists(&output_dir)?;
+        debug!(target: "Aligner", "Output directory exists: {}", output_dir.display());
         let aligner = silence_stderr(|| BwaAligner::from_path(&reference))??;
         let header = aligner.create_bam_header();
         let output_filename = process_filename(&reference)?;
@@ -88,7 +88,7 @@ impl Aligner {
         (self.fastq_filename_1.clone(), self.fastq_filename_2.clone())
     }
     
-    pub fn process_batch(&mut self, read_pairs: &[ReadPair], opts: &cli::CliOptions) -> Result<()> {
+    pub fn process_batch(&mut self, read_pairs: &[ReadPair], opts: &cli::ProgramOptions) -> Result<()> {
         let mut reads = Vec::<fastq::Record>::new();
 
         for read_pair in read_pairs.iter() {
@@ -164,5 +164,14 @@ impl Aligner {
         }
 
         Ok(alignments)
+    }
+
+    fn get_reference_filename(&self) -> Result<String> {
+        // get the reference filename without its full path (just the basename)
+        let reference_filename = self.reference.file_name().and_then(|s| s.to_str());
+        match reference_filename {
+            Some(f) => Ok(f.to_string()),
+            None => Err(anyhow!("Error processing reference filename")),
+        }
     }
 }

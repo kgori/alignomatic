@@ -1,8 +1,7 @@
 use crate::mapping_status::MappingStatus;
 use anyhow::{anyhow, Result};
 use bio::io::fastq::{self, FastqRead};
-#[allow(unused_imports)]
-use log::{debug, error, info};
+use log::debug;
 use niffler;
 use rust_htslib::bam;
 use std::fs::File;
@@ -24,12 +23,16 @@ pub struct ReadPairIterator {
 
 impl ReadPairIterator {
     pub fn new(file1: std::path::PathBuf, file2: std::path::PathBuf) -> Result<Self> {
+        debug!(target: "IO", "Opening files: {:?}, {:?}", file1, file2);
         let file1 = File::open(file1)?;
         let file2 = File::open(file2)?;
 
-        let (reader1, _) = niffler::get_reader(Box::new(file1))?;
-        let (reader2, _) = niffler::get_reader(Box::new(file2))?;
+        let (reader1, format) = niffler::get_reader(Box::new(file1))?;
+        let (reader2, format2) = niffler::get_reader(Box::new(file2))?;
 
+        debug!(target: "IO", "Detected file1 compression: {:?}", format);
+        debug!(target: "IO", "Detected file2 compression: {:?}", format2);
+        
         let reader1 = fastq::Reader::new(reader1);
         let reader2 = fastq::Reader::new(reader2);
         Ok(Self { reader1, reader2 })

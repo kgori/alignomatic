@@ -16,6 +16,10 @@ env_logger = "0.11.5"
 libc = "0.2.159"
 niffler = "2.6.0"
 bgzf = "0.2.0"
+blake3 = "1.7.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+toml = "0.8.20"
 
 # Tips on making bindgen work:
 # Use the pacbio conda environment and set environment variables

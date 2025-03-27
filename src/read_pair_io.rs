@@ -32,7 +32,7 @@ impl ReadPairIterator {
 
         debug!(target: "IO", "Detected file1 compression: {:?}", format);
         debug!(target: "IO", "Detected file2 compression: {:?}", format2);
-        
+
         let reader1 = fastq::Reader::new(reader1);
         let reader2 = fastq::Reader::new(reader2);
         Ok(Self { reader1, reader2 })

@@ -1,8 +1,7 @@
+use crate::utils::{create_bgzf_fastq_writer, FastqWriter};
 use anyhow::{anyhow, Result};
 use bio::io::fastq;
 use std::collections::HashMap;
-use crate::utils::{create_bgzf_fastq_writer, FastqWriter};
-
 
 pub struct OutputWriter {
     base_dir: std::path::PathBuf,
@@ -10,7 +9,6 @@ pub struct OutputWriter {
     written_count: usize,
     fragment_count: usize,
 }
-
 
 impl OutputWriter {
     pub fn new(base_dir: std::path::PathBuf) -> Result<Self> {

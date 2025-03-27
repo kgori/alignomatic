@@ -70,7 +70,7 @@ impl BufferedBamReader {
         while let Some(result) = self.reader.read(&mut record) {
             let _ = result?;
             let qname = std::str::from_utf8(record.qname())?;
-            
+
             // Check if the match condition has been met
             if qname == name {
                 found_match = true;

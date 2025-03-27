@@ -42,30 +42,51 @@ fn process_filename(filename: &PathBuf) -> Result<PathBuf> {
     }
 }
 
+pub fn output_filenames(
+    reference: &PathBuf,
+    output_dir: &PathBuf,
+) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf)> {
+    let output_filename = process_filename(&reference)?;
+    let bam_filename = output_dir.join(&output_filename).with_extension("bam");
+    let fastq_filename_1 = output_dir
+        .join(&output_filename)
+        .with_extension("1.fastq.gz");
+    let fastq_filename_2 = output_dir
+        .join(&output_filename)
+        .with_extension("2.fastq.gz");
+    let checkpoint_filename = output_dir
+        .join(&output_filename)
+        .with_extension("checkpoint.json");
+
+    Ok((
+        bam_filename,
+        fastq_filename_1,
+        fastq_filename_2,
+        checkpoint_filename,
+    ))
+}
+
 impl Aligner {
-    pub fn new(reference: &PathBuf, output_dir: &PathBuf, writing_threads: Option<usize>) -> Result<Self> {
+    pub fn new(
+        reference: &PathBuf,
+        output_dir: &PathBuf,
+        writing_threads: Option<usize>,
+    ) -> Result<Self> {
         check_file_exists(&reference)?;
         debug!(target: "Aligner", "Reference file exists: {}", reference.display());
         check_directory_exists(&output_dir)?;
         debug!(target: "Aligner", "Output directory exists: {}", output_dir.display());
         let aligner = silence_stderr(|| BwaAligner::from_path(&reference))??;
         let header = aligner.create_bam_header();
-        let output_filename = process_filename(&reference)?;
-        let bam_filename = output_dir
-            .join(output_filename.clone())
-            .with_extension("bam");
+
+        let (bam_filename, fastq_filename_1, fastq_filename_2, _) =
+            output_filenames(&reference, &output_dir)?;
+        let fastq_writer_1 = create_bgzf_fastq_writer(&fastq_filename_1)?;
+        let fastq_writer_2 = create_bgzf_fastq_writer(&fastq_filename_2)?;
         let mut bam_writer = bam::Writer::from_path(&bam_filename, &header, bam::Format::Bam)?;
         if let Some(threads) = writing_threads {
             bam_writer.set_threads(threads)?;
         }
-        let fastq_filename_1 = output_dir
-            .join(output_filename.clone())
-            .with_extension("1.fastq.gz");
-        let fastq_filename_2 = output_dir
-            .join(output_filename)
-            .with_extension("2.fastq.gz");
-        let fastq_writer_1 = create_bgzf_fastq_writer(&fastq_filename_1)?;
-        let fastq_writer_2 = create_bgzf_fastq_writer(&fastq_filename_2)?;
 
         Ok(Self {
             aligner,
@@ -80,15 +101,19 @@ impl Aligner {
         })
     }
 
-    pub fn bamfile(&self) -> PathBuf {
-        self.bam_filename.clone()
+    pub fn bamfile(&self) -> &PathBuf {
+        &self.bam_filename
     }
 
-    pub fn fastqfiles(&self) -> (PathBuf, PathBuf) {
-        (self.fastq_filename_1.clone(), self.fastq_filename_2.clone())
+    pub fn fastqfiles(&self) -> (&PathBuf, &PathBuf) {
+        (&self.fastq_filename_1, &self.fastq_filename_2)
     }
-    
-    pub fn process_batch(&mut self, read_pairs: &[ReadPair], opts: &cli::ProgramOptions) -> Result<()> {
+
+    pub fn process_batch(
+        &mut self,
+        read_pairs: &[ReadPair],
+        opts: &cli::ProgramOptions,
+    ) -> Result<()> {
         let mut reads = Vec::<fastq::Record>::new();
 
         for read_pair in read_pairs.iter() {

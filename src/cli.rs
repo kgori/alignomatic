@@ -1,17 +1,17 @@
+use crate::utils::check_file_exists;
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 #[allow(unused_imports)]
 use log::{debug, info, warn};
-use crate::utils::check_file_exists;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 struct CliOptions {
-    /// Optional path to a config file (TOML format)
+    /// Optional path to a config file (JSON format)
     #[arg(long)]
     config: Option<PathBuf>,
-    
+
     #[arg(short = '1', long, value_name = "FILE")]
     fastq_first: Option<PathBuf>,
 
@@ -31,8 +31,7 @@ struct CliOptions {
         short = 'o',
         long,
         value_name = "FILE",
-        help = "Output folder for all fastq files. Will be created if it doesn't exist.",
-        required = true
+        help = "Output folder for all fastq files. Will be created if it doesn't exist."
     )]
     output_folder: Option<PathBuf>,
 
@@ -85,26 +84,38 @@ pub struct ProgramOptions {
 
 fn load_config(path: &PathBuf) -> ConfigFileOptions {
     let content = std::fs::read_to_string(path).expect("Failed to read config file");
-    toml::from_str(&content).expect("Failed to parse config file")
+    serde_json::from_str(&content).expect("Failed to parse config file")
 }
 
 fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> ProgramOptions {
     ProgramOptions {
-        fastq_first: cli.fastq_first.or(config.fastq_first).expect("No first fastq file provided"),
-        fastq_second: cli.fastq_second.or(config.fastq_second).expect("No second fastq file provided"),
+        fastq_first: cli
+            .fastq_first
+            .or(config.fastq_first)
+            .expect("No first fastq file provided"),
+        fastq_second: cli
+            .fastq_second
+            .or(config.fastq_second)
+            .expect("No second fastq file provided"),
         index: cli.index.or(config.index).expect("No index files provided"),
-        output_folder: cli.output_folder.or(config.output_folder).expect("No output folder provided"),
+        output_folder: cli
+            .output_folder
+            .or(config.output_folder)
+            .expect("No output folder provided"),
         batch_size: cli.batch_size.or(config.batch_size).unwrap_or(66666),
         threads: cli.threads.or(config.threads).unwrap_or(1),
         min_block_size: cli.min_block_size.or(config.min_block_size).unwrap_or(30),
-        min_block_quality: cli.min_block_quality.or(config.min_block_quality).unwrap_or(10.0),
+        min_block_quality: cli
+            .min_block_quality
+            .or(config.min_block_quality)
+            .unwrap_or(10.0),
     }
 }
 
 fn write_config(config: &ProgramOptions) -> Result<()> {
-    let toml_str = toml::to_string_pretty(config)?;
-    let path = config.output_folder.join("config").with_extension("toml");
-    std::fs::write(&path, toml_str)?;
+    let json_str = serde_json::to_string_pretty(config)?;
+    let path = config.output_folder.join("config").with_extension("json");
+    std::fs::write(&path, json_str)?;
     info!(target: "PARAMS", "Wrote config file to {:?}", path);
     Ok(())
 }
@@ -175,7 +186,11 @@ fn create_output_folder(opts: &ProgramOptions) -> Result<()> {
 
 pub fn get_program_options() -> Result<ProgramOptions> {
     let cli_opts = CliOptions::parse();
-    let config_opts = cli_opts.config.as_ref().map(load_config).unwrap_or_default();
+    let config_opts = cli_opts
+        .config
+        .as_ref()
+        .map(load_config)
+        .unwrap_or_default();
     let final_opts = merge_options(cli_opts, config_opts);
     check_options(&final_opts)?;
     create_output_folder(&final_opts)?;

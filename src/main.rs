@@ -46,16 +46,7 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
     let workspace = opts.output_folder.join("workspace");
 
     for index in &opts.index {
-        info!(target: "BWA", "Loading BWA index from {}", index.display());
-        let mut read_pair_iter = ReadPairIterator::new(fastq1.clone(), fastq2.clone())?;
-
-        let mut aligner = Aligner::new(
-            &index,
-            &workspace,
-            Some(opts.threads),
-        )?;
-        debug!(target: "Aligner", "Created aligner from {}", index.display());
-        let mut n_readpairs_processed: usize = 0;
+        info!(target: "Aligner", "Loading index {}", index.display());
 
         // CHECKPOINTING:
         // Look for presence of a checkpoint file
@@ -67,27 +58,51 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
         //     1 - Do checkpoint hashing work in background
         //     2 - run the loop
         //     3 - write the checkpoint file with the hash data
-        let mut do_work = true;
-        let checkpoint_file = workspace.join(index.file_name().unwrap()).with_extension("checkpoint.json");
-        
+
+        info!(target: "Checkpoint", "Looking for checkpoint file for index {}", index.display());
+        let (bamfile, fqout1, fqout2, checkpoint_file) =
+            aligner::output_filenames(&index, &workspace)?;
+        debug!(target: "Checkpoint", "Checkpoint file: {}", checkpoint_file.display());
+        debug!(target: "Checkpoint", "Output bam file: {}", bamfile.display());
+        debug!(target: "Checkpoint", "Output fastq file 1: {}", fqout1.display());
+        debug!(target: "Checkpoint", "Output fastq file 2: {}", fqout2.display());
+
         if checkpoint_file.exists() {
+            info!(target: "Checkpoint", "Checkpoint file found for index {}", index.display());
             let checkpoint_on_disk = checkpoint::read_checkpoint(&checkpoint_file)?;
-            let (fq1, fq2) = aligner.fastqfiles();
             let checkpoint_computed = checkpoint::Checkpoint::create(
-                index,
-                &fastq1,
-                &fastq2,
-                &aligner.bamfile(),
-                &fq1,
-                &fq2,
+                index, &fastq1, &fastq2, &bamfile, &fqout1, &fqout2, opts.batch_size,
+                opts.min_block_size, opts.min_block_quality,
             )?;
 
             if checkpoint_on_disk.matches(&checkpoint_computed) {
-                do_work = false;
+                info!(target: "Checkpoint", "Checkpoint verified for index {}. Skipping alignment.", index.display());
+                bam_files.push(bamfile);
+                (fastq1, fastq2) = (fqout1, fqout2);
+                continue;
+            } else {
+                info!(target: "Checkpoint", "Checkpoint mismatch for index {}. Recomputing alignment.", index.display());
+                debug!(target: "Checkpoint", "Checkpoint on disk: {:?}", checkpoint_on_disk);
+                debug!(target: "Checkpoint", "Checkpoint computed: {:?}", checkpoint_computed);
             }
+        } else {
+            info!(target: "Checkpoint", "Checkpoint not found for index {}. Computing alignment.", index.display());
         }
 
-        if do_work {
+        // If we got here it means there is work to be done (no checkpoint file or hash mismatch)
+        // Create the aligner
+        {
+            let mut aligner = Aligner::new(
+                &index, &workspace,
+                None, // Writing threads: Default to 1 & use multiple threads for aligning
+            )?;
+            info!(target: "Aligner", "Aligning reads to index {}", index.display());
+            let mut read_pair_iter = ReadPairIterator::new(fastq1.clone(), fastq2.clone())?;
+            assert_eq!(aligner.bamfile(), &bamfile);
+            assert_eq!(aligner.fastqfiles(), (&fqout1, &fqout2));
+            let mut n_readpairs_processed: usize = 0;
+
+            // Process all the reads
             loop {
                 let read_pairs = read_pair_iter.batch(opts.batch_size);
                 let n_read_pairs = read_pairs.len();
@@ -101,31 +116,22 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
                     info!(target: "BWA", "{} read pairs processed", n_readpairs_processed);
                 }
             }
+        }
 
-            // Write checkpoint file
-            let (fq1, fq2) = aligner.fastqfiles();
-            let ckpt = checkpoint::Checkpoint::create(
-                index,
-                &fastq1,
-                &fastq2,
-                &aligner.bamfile(),
-                &fq1,
-                &fq2,
-            )?;
-            checkpoint::write_checkpoint(&ckpt, &checkpoint_file)?;
-        }
-        else {
-            info!(target: "Checkpoint", "Alignment for index {} is already computed", index.display());
-        }
-        bam_files.push(aligner.bamfile().clone());
-        (fastq1, fastq2) = aligner.fastqfiles();
+        // Write checkpoint file
+        info!(target: "Checkpoint", "Successfully completed. Writing checkpoint file for index {}", index.display());
+        let ckpt =
+            checkpoint::Checkpoint::create(index, &fastq1, &fastq2, &bamfile, &fqout1, &fqout2,
+                opts.batch_size, opts.min_block_size, opts.min_block_quality)?;
+        checkpoint::write_checkpoint(&ckpt, &checkpoint_file)?;
+        bam_files.push(bamfile);
+        (fastq1, fastq2) = (fqout1, fqout2);
     }
 
     Ok(bam_files)
 }
 
 fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions) -> Result<()> {
-
     let final_bamfile = bam_files.last().unwrap();
     let mut final_bam =
         bam_io::BufferedBamReader::new(bam::Reader::from_path(final_bamfile).unwrap());
@@ -188,14 +194,14 @@ fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions) ->
             mapped_pair.insert(record);
         }
 
-
         for bam_reader in bam_readers.iter_mut() {
-
             // This is a run-time check. All read pairs from the final bam file should be
             // present in all other bam files. If not, it's an error. This checks both read1
             // and read2.
-            let mut check_map_read1: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
-            let mut check_map_read2: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+            let mut check_map_read1: std::collections::BTreeMap<String, bool> =
+                std::collections::BTreeMap::new();
+            let mut check_map_read2: std::collections::BTreeMap<String, bool> =
+                std::collections::BTreeMap::new();
             for key in alignments.keys() {
                 check_map_read1.insert(key.clone(), false);
                 check_map_read2.insert(key.clone(), false);
@@ -217,17 +223,22 @@ fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions) ->
             // Every key should be found, no exceptions.
             for (key, value) in check_map_read1.iter() {
                 if !value {
-                    return Err(anyhow::anyhow!("Read 1 of pair {} not found in all bam files", key));
+                    return Err(anyhow::anyhow!(
+                        "Read 1 of pair {} not found in all bam files",
+                        key
+                    ));
                 }
             }
 
             for (key, value) in check_map_read2.iter() {
                 if !value {
-                    return Err(anyhow::anyhow!("Read 2 of pair {} not found in all bam files", key));
+                    return Err(anyhow::anyhow!(
+                        "Read 2 of pair {} not found in all bam files",
+                        key
+                    ));
                 }
             }
         }
-
 
         for (id, read_pair) in alignments {
             let status1 = get_mapping_status(&read_pair.read1, &opts)?;

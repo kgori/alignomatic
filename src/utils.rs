@@ -5,6 +5,7 @@ use rust_htslib::bam;
 use std::collections::HashSet;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
+use std::path::{Component, Path, PathBuf};
 
 /// Intercepts any stderr output from the wrapped function
 pub fn silence_stderr<T, F>(f: F) -> Result<T>
@@ -139,7 +140,7 @@ pub fn fastq_to_unmapped_fragments(
     Ok(fragments)
 }
 
-pub fn check_file_exists(file: &std::path::PathBuf) -> Result<()> {
+pub fn check_file_exists(file: &PathBuf) -> Result<()> {
     let existence = file.try_exists();
     match existence {
         Ok(true) => Ok(()),
@@ -147,7 +148,7 @@ pub fn check_file_exists(file: &std::path::PathBuf) -> Result<()> {
     }
 }
 
-pub fn check_directory_exists(dir: &std::path::PathBuf) -> Result<()> {
+pub fn check_directory_exists(dir: &PathBuf) -> Result<()> {
     let existence = dir.try_exists();
     match (existence, dir.is_dir()) {
         (Ok(true), true) => Ok(()),
@@ -161,7 +162,7 @@ pub fn check_directory_exists(dir: &std::path::PathBuf) -> Result<()> {
 
 pub type FastqWriter = fastq::Writer<BgzfWriter<std::fs::File>>;
 
-pub fn create_bgzf_fastq_writer(path: &std::path::Path) -> Result<FastqWriter> {
+pub fn create_bgzf_fastq_writer(path: &Path) -> Result<FastqWriter> {
     let file = std::fs::File::create(path)?;
     let bgzf_writer = BgzfWriter::new(file, 6.try_into()?);
     Ok(fastq::Writer::new(bgzf_writer))
@@ -187,6 +188,30 @@ pub fn bam_to_fastq(record: bam::Record) -> Result<fastq::Record> {
     Ok(fastq::Record::with_attrs(&id, None, &seq, &qual))
 }
 
+pub fn normalize_path<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
+    let mut stack = Vec::new();
+    let path = std::env::current_dir()?.join(path);
+
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                stack.pop();
+            }
+            Component::CurDir => {
+
+            }
+            _ => stack.push(component),
+        }
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in stack {
+        normalized.push(component);
+    }
+
+    Ok(normalized)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -197,8 +222,8 @@ mod test {
     fn test_bam_to_fastq() {
         let mut bam_reader = bam::Reader::from_path("data/test.bam").unwrap();
         let mut fastq_reader = ReadPairIterator::new(
-            std::path::PathBuf::from("data/test.1.fq.gz"),
-            std::path::PathBuf::from("data/test.2.fq.gz"),
+            PathBuf::from("data/test.1.fq.gz"),
+            PathBuf::from("data/test.2.fq.gz"),
         )
         .unwrap();
 

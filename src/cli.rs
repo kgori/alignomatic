@@ -1,4 +1,4 @@
-use crate::utils::check_file_exists;
+use crate::utils::{check_file_exists, normalize_path};
 use anyhow::{anyhow, Result};
 use clap::Parser;
 #[allow(unused_imports)]
@@ -87,21 +87,27 @@ fn load_config(path: &PathBuf) -> ConfigFileOptions {
     serde_json::from_str(&content).expect("Failed to parse config file")
 }
 
-fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> ProgramOptions {
-    ProgramOptions {
-        fastq_first: cli
+fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> Result<ProgramOptions> {
+    let options = ProgramOptions {
+        fastq_first: normalize_path(cli
             .fastq_first
             .or(config.fastq_first)
-            .expect("No first fastq file provided"),
-        fastq_second: cli
+            .expect("No first fastq file provided"))?,
+        fastq_second: normalize_path(cli
             .fastq_second
             .or(config.fastq_second)
-            .expect("No second fastq file provided"),
-        index: cli.index.or(config.index).expect("No index files provided"),
-        output_folder: cli
+            .expect("No second fastq file provided"))?,
+        index: cli
+            .index
+            .or(config.index)
+            .expect("No index files provided")
+            .iter()
+            .map(normalize_path)
+            .collect::<Result<Vec<PathBuf>>>()?,
+        output_folder: normalize_path(cli
             .output_folder
             .or(config.output_folder)
-            .expect("No output folder provided"),
+            .expect("No output folder provided"))?,
         batch_size: cli.batch_size.or(config.batch_size).unwrap_or(66666),
         threads: cli.threads.or(config.threads).unwrap_or(1),
         min_block_size: cli.min_block_size.or(config.min_block_size).unwrap_or(30),
@@ -109,7 +115,8 @@ fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> ProgramOptions {
             .min_block_quality
             .or(config.min_block_quality)
             .unwrap_or(10.0),
-    }
+    };
+    Ok(options)
 }
 
 fn write_config(config: &ProgramOptions) -> Result<()> {
@@ -191,7 +198,7 @@ pub fn get_program_options() -> Result<ProgramOptions> {
         .as_ref()
         .map(load_config)
         .unwrap_or_default();
-    let final_opts = merge_options(cli_opts, config_opts);
+    let final_opts = merge_options(cli_opts, config_opts)?;
     check_options(&final_opts)?;
     create_output_folder(&final_opts)?;
     write_config(&final_opts)?;

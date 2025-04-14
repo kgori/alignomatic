@@ -94,7 +94,7 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
         {
             let mut aligner = Aligner::new(
                 &index, &workspace,
-                None, // Writing threads: Default to 1 & use multiple threads for aligning
+                Some(opts.threads), // Writing threads: use multiple threads for writing and aligning
             )?;
             info!(target: "Aligner", "Aligning reads to index {}", index.display());
             let mut read_pair_iter = ReadPairIterator::new(fastq1.clone(), fastq2.clone())?;
@@ -104,7 +104,7 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
 
             // Process all the reads
             loop {
-                let read_pairs = read_pair_iter.batch(opts.batch_size);
+                let read_pairs = read_pair_iter.take_bases(opts.threads * opts.batch_size);
                 let n_read_pairs = read_pairs.len();
 
                 if n_read_pairs == 0 {

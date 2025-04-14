@@ -38,7 +38,7 @@ impl ReadPairIterator {
         Ok(Self { reader1, reader2 })
     }
 
-    pub fn batch(&mut self, batch_size: usize) -> Vec<ReadPair> {
+    pub fn take_pairs(&mut self, batch_size: usize) -> Vec<ReadPair> {
         let mut batch = Vec::with_capacity(batch_size);
 
         for _ in 0..batch_size {
@@ -48,6 +48,23 @@ impl ReadPairIterator {
                 break;
             }
         }
+        batch
+    }
+
+    pub fn take_bases(&mut self, base_pairs: usize) -> Vec<ReadPair> {
+        let mut batch = Vec::new();
+        let mut collected = 0;
+
+        while collected < base_pairs {
+            if let Some(read_pair) = self.next() {
+                let bases = read_pair.read1.seq().len() + read_pair.read2.seq().len();
+                batch.push(read_pair);
+                collected += bases;
+            } else {
+                break;
+            }
+        }
+        debug!(target: "IO", "Collected {} read pairs, {} bases", batch.len(), collected);
         batch
     }
 }

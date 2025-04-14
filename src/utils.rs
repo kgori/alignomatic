@@ -229,7 +229,7 @@ mod test {
 
         let mut converted_1 = Vec::new();
         let mut converted_2 = Vec::new();
-        let reference = fastq_reader.batch(10000);
+        let reference = fastq_reader.take_pairs(10000);
 
         loop {
             let bam_record = bam_reader.records().next().unwrap().unwrap();

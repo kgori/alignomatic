@@ -35,7 +35,7 @@ struct CliOptions {
     )]
     output_folder: Option<PathBuf>,
 
-    #[arg(short, long)]
+    #[arg(short, long, help = "Batch size to process, in base pairs per thread. Default is 10000000.")]
     batch_size: Option<usize>,
 
     #[arg(
@@ -108,7 +108,7 @@ fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> Result<ProgramOp
             .output_folder
             .or(config.output_folder)
             .expect("No output folder provided"))?,
-        batch_size: cli.batch_size.or(config.batch_size).unwrap_or(66666),
+        batch_size: cli.batch_size.or(config.batch_size).unwrap_or(10_000_000),
         threads: cli.threads.or(config.threads).unwrap_or(1),
         min_block_size: cli.min_block_size.or(config.min_block_size).unwrap_or(30),
         min_block_quality: cli

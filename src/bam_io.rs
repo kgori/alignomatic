@@ -33,7 +33,7 @@ impl BufferedBamReader {
             if result.is_none() {
                 break;
             }
-            let _ = result.unwrap()?;
+            result.unwrap()?;
             let qname = String::from_utf8(record.qname().to_vec())?;
             if prev_name.as_ref() != Some(&qname) {
                 prev_name.replace(qname);
@@ -68,7 +68,7 @@ impl BufferedBamReader {
 
         // Process remaining records
         while let Some(result) = self.reader.read(&mut record) {
-            let _ = result?;
+            result?;
             let qname = std::str::from_utf8(record.qname())?;
 
             // Check if the match condition has been met

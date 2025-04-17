@@ -21,6 +21,11 @@ use read_pair_io::{MappedReadPair, ReadPairIterator};
 use utils::{bam_to_fastq, create_bgzf_fastq_writer};
 
 fn main() -> Result<()> {
+    if std::env::args().len() == 1 {
+        println!("No arguments provided. Use --help for usage information.");
+        std::process::exit(0);
+    }
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let opts: cli::ProgramOptions = cli::get_program_options()?;
@@ -61,7 +66,7 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
 
         info!(target: "Checkpoint", "Looking for checkpoint file for index {}", index.display());
         let (bamfile, fqout1, fqout2, checkpoint_file) =
-            aligner::output_filenames(&index, &workspace)?;
+            aligner::output_filenames(index, &workspace)?;
         debug!(target: "Checkpoint", "Checkpoint file: {}", checkpoint_file.display());
         debug!(target: "Checkpoint", "Output bam file: {}", bamfile.display());
         debug!(target: "Checkpoint", "Output fastq file 1: {}", fqout1.display());
@@ -93,7 +98,7 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
         // Create the aligner
         {
             let mut aligner = Aligner::new(
-                &index, &workspace,
+                index, &workspace,
                 Some(opts.threads), // Writing threads: use multiple threads for writing and aligning
             )?;
             info!(target: "Aligner", "Aligning reads to index {}", index.display());
@@ -111,7 +116,7 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
                     break;
                 } else {
                     info!(target: "BWA", "Aligning {} read pairs", read_pairs.len());
-                    aligner.process_batch(&read_pairs, &opts)?;
+                    aligner.process_batch(&read_pairs, opts)?;
                     n_readpairs_processed += n_read_pairs;
                     info!(target: "BWA", "{} read pairs processed", n_readpairs_processed);
                 }
@@ -241,12 +246,10 @@ fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions) ->
         }
 
         for (id, read_pair) in alignments {
-            let status1 = get_mapping_status(&read_pair.read1, &opts)?;
-            let status2 = get_mapping_status(&read_pair.read2, &opts)?;
+            let status1 = get_mapping_status(&read_pair.read1, opts)?;
+            let status2 = get_mapping_status(&read_pair.read2, opts)?;
             match (status1, status2) {
-                (Mapped, Mapped) => {
-                    ();
-                }
+                (Mapped, Mapped) => { }
                 (Unmapped, Unmapped) => {
                     let f1 = convert_bam_to_fastq(&read_pair.read1)?;
                     let f2 = convert_bam_to_fastq(&read_pair.read2)?;

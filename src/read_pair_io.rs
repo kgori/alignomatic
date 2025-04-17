@@ -2,7 +2,6 @@ use crate::mapping_status::MappingStatus;
 use anyhow::{anyhow, Result};
 use bio::io::fastq::{self, FastqRead};
 use log::debug;
-use niffler;
 use rust_htslib::bam;
 use std::fs::File;
 use std::io;
@@ -82,10 +81,10 @@ impl Iterator for ReadPairIterator {
         if result1.is_ok() && result2.is_ok() {
             let read_pair = ReadPair::new(record1, record2);
             if let Ok(read_pair) = read_pair {
-                return Some(read_pair);
+                Some(read_pair)
             } else {
                 // error!("Failed to create a read pair: {:?}", read_pair.err());
-                return None;
+                None
             }
         } else {
             None

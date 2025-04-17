@@ -59,7 +59,7 @@ pub fn get_mapping_status(records: &[bam::Record], opts: &ProgramOptions) -> Res
     let len = records[0].seq_len();
 
     let mut positions: HashSet<usize> =
-        get_clipped_positions(&records[0]).iter().cloned().collect();
+        get_clipped_positions(records[0]).iter().cloned().collect();
 
     for record in &records[1..] {
         if record.qname() != read_name {
@@ -97,7 +97,7 @@ pub fn get_mapping_status(records: &[bam::Record], opts: &ProgramOptions) -> Res
     // Mark read as partially unmapped if it passes block size and average block quality checks
     let positions = block_filter(
         positions,
-        &records[0].qual(),
+        records[0].qual(),
         opts.min_block_size,
         opts.min_block_quality,
     ); // arbitrary values for min block size and quality

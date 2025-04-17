@@ -184,7 +184,7 @@ impl OutputWriter {
             .files
             .get_mut(key)
             .ok_or_else(|| anyhow!("Invalid key: {}", key))?;
-        writer.write_record(&record)?;
+        writer.write_record(record)?;
         self.written_count += 1;
         Ok(())
     }

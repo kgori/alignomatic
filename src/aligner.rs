@@ -29,7 +29,7 @@ pub struct Aligner {
     fastq_writer_2: FastqWriter,
 }
 
-fn process_filename(filename: &PathBuf) -> Result<PathBuf> {
+fn process_filename(filename: &Path) -> Result<PathBuf> {
     let binding = filename.canonicalize()?;
     let processed = binding
         .file_name()
@@ -43,10 +43,10 @@ fn process_filename(filename: &PathBuf) -> Result<PathBuf> {
 }
 
 pub fn output_filenames(
-    reference: &PathBuf,
-    output_dir: &PathBuf,
+    reference: &Path,
+    output_dir: &Path,
 ) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf)> {
-    let output_filename = process_filename(&reference)?;
+    let output_filename = process_filename(reference)?;
     let bam_filename = output_dir.join(&output_filename).with_extension("bam");
     let fastq_filename_1 = output_dir
         .join(&output_filename)
@@ -69,18 +69,18 @@ pub fn output_filenames(
 impl Aligner {
     pub fn new(
         reference: &PathBuf,
-        output_dir: &PathBuf,
+        output_dir: &Path,
         writing_threads: Option<usize>,
     ) -> Result<Self> {
-        check_file_exists(&reference)?;
+        check_file_exists(reference)?;
         debug!(target: "Aligner", "Reference file exists: {}", reference.display());
-        check_directory_exists(&output_dir)?;
+        check_directory_exists(output_dir)?;
         debug!(target: "Aligner", "Output directory exists: {}", output_dir.display());
-        let aligner = silence_stderr(|| BwaAligner::from_path(&reference))??;
+        let aligner = silence_stderr(|| BwaAligner::from_path(reference))??;
         let header = aligner.create_bam_header();
 
         let (bam_filename, fastq_filename_1, fastq_filename_2, _) =
-            output_filenames(&reference, &output_dir)?;
+            output_filenames(reference, output_dir)?;
         let fastq_writer_1 = create_bgzf_fastq_writer(&fastq_filename_1)?;
         let fastq_writer_2 = create_bgzf_fastq_writer(&fastq_filename_2)?;
         let mut bam_writer = bam::Writer::from_path(&bam_filename, &header, bam::Format::Bam)?;
@@ -91,7 +91,7 @@ impl Aligner {
         Ok(Self {
             aligner,
             reference: reference.clone(),
-            output_dir: output_dir.clone(),
+            output_dir: output_dir.to_path_buf(),
             bam_filename,
             bam_writer,
             fastq_filename_1,
@@ -129,8 +129,8 @@ impl Aligner {
             let id = &input_pair.id;
             if alignments.contains_key(id) {
                 let mapped_pair = alignments.get(id).unwrap();
-                let read1_status = get_mapping_status(&mapped_pair.read1, &opts)?;
-                let read2_status = get_mapping_status(&mapped_pair.read2, &opts)?;
+                let read1_status = get_mapping_status(&mapped_pair.read1, opts)?;
+                let read2_status = get_mapping_status(&mapped_pair.read2, opts)?;
                 match (read1_status, read2_status) {
                     (Mapped, Mapped) => {
                         continue;
@@ -141,11 +141,11 @@ impl Aligner {
                     }
                     _ => {
                         for bam_record in mapped_pair.read1.iter() {
-                            self.bam_writer.write(&bam_record)?;
+                            self.bam_writer.write(bam_record)?;
                             bam_write_count += 1;
                         }
                         for bam_record in mapped_pair.read2.iter() {
-                            self.bam_writer.write(&bam_record)?;
+                            self.bam_writer.write(bam_record)?;
                             bam_write_count += 1;
                         }
                         self.fastq_writer_1.write_record(&input_pair.read1)?;
@@ -171,7 +171,7 @@ impl Aligner {
         let mut alignments = BTreeMap::new();
         let bwa_result = silence_stderr(|| {
             self.aligner
-                .align_fastq_records(&reads, true, true, threads)
+                .align_fastq_records(reads, true, true, threads)
         })??;
 
         bwa_result.into_iter().for_each(|r| {
@@ -184,7 +184,7 @@ impl Aligner {
                 .insert(r);
         });
 
-        if alignments.len() == 0 {
+        if alignments.is_empty() {
             return Err(anyhow!("No alignments were generated"));
         }
 

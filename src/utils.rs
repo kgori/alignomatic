@@ -140,7 +140,7 @@ pub fn fastq_to_unmapped_fragments(
     Ok(fragments)
 }
 
-pub fn check_file_exists(file: &PathBuf) -> Result<()> {
+pub fn check_file_exists(file: &Path) -> Result<()> {
     let existence = file.try_exists();
     match existence {
         Ok(true) => Ok(()),
@@ -148,7 +148,7 @@ pub fn check_file_exists(file: &PathBuf) -> Result<()> {
     }
 }
 
-pub fn check_directory_exists(dir: &PathBuf) -> Result<()> {
+pub fn check_directory_exists(dir: &Path) -> Result<()> {
     let existence = dir.try_exists();
     match (existence, dir.is_dir()) {
         (Ok(true), true) => Ok(()),

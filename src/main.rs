@@ -18,7 +18,7 @@ mod utils;
 use aligner::Aligner;
 use mapping_status::{get_mapping_status, MappingStatus::*};
 use read_pair_io::{MappedReadPair, ReadPairIterator};
-use utils::{bam_to_fastq, create_bgzf_fastq_writer};
+use utils::{bam_to_fastq, create_bgzf_fastq_writer, estimate_results_batch_size};
 
 fn main() -> Result<()> {
     if std::env::args().len() == 1 {
@@ -30,8 +30,10 @@ fn main() -> Result<()> {
 
     let opts: cli::ProgramOptions = cli::get_program_options()?;
 
+    let results_batch_size = estimate_results_batch_size(&opts)?;
+    debug!(target: "IO", "Estimated results batch size: {}", results_batch_size);
     let bam_files = generate_alignments(&opts)?;
-    let result = post_process_alignments(&bam_files, &opts);
+    let result = post_process_alignments(&bam_files, &opts, results_batch_size);
     if result.is_ok() {
         info!(target: "IO", "Finished processing alignments");
     } else {
@@ -136,7 +138,7 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
     Ok(bam_files)
 }
 
-fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions) -> Result<()> {
+fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions, batch_size: usize) -> Result<()> {
     let final_bamfile = bam_files.last().unwrap();
     let mut final_bam =
         bam_io::BufferedBamReader::new(bam::Reader::from_path(final_bamfile).unwrap());
@@ -147,7 +149,7 @@ fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions) ->
         .map(|bamfile| bam_io::BufferedBamReader::new(bam::Reader::from_path(bamfile).unwrap()))
         .collect::<Vec<_>>();
 
-    info!(target: "IO", "Writing results to fastq files in {}", opts.output_folder.join("results").display());
+    info!(target: "Results", "Writing results to fastq files in {}", opts.output_folder.join("results").display());
     let mut unmapped_pairs1 =
         create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_uu.1.fq.gz"))?;
     let mut unmapped_pairs2 =
@@ -182,7 +184,8 @@ fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions) ->
     let mut fragmentary_pairs2 =
         create_bgzf_fastq_writer(&opts.output_folder.join("results/reads_ff.2.fq.gz"))?;
 
-    while let Ok(batch) = final_bam.take_n_qnames(opts.batch_size) {
+    debug!(target: "Results", "Reading BAMs in batches of size {}", batch_size);
+    while let Ok(batch) = final_bam.take_n_qnames(batch_size) {
         if batch.is_empty() {
             break;
         }
@@ -245,6 +248,7 @@ fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions) ->
             }
         }
 
+        debug!(target: "Results", "Processing {} read pairs", alignments.len());
         for (id, read_pair) in alignments {
             let status1 = get_mapping_status(&read_pair.read1, opts)?;
             let status2 = get_mapping_status(&read_pair.read2, opts)?;

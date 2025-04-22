@@ -6,6 +6,9 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
+use log::debug;
+use crate::cli::ProgramOptions;
+use crate::read_pair_io::ReadPairIterator;
 
 /// Intercepts any stderr output from the wrapped function
 pub fn silence_stderr<T, F>(f: F) -> Result<T>
@@ -210,6 +213,25 @@ pub fn normalize_path<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
     }
 
     Ok(normalized)
+}
+
+pub fn estimate_results_batch_size(opts: &ProgramOptions) -> Result<usize> {
+    debug!(target: "UTILS", "Estimating batch size");
+    let fastq1 = opts.fastq_first.clone();
+    let fastq2 = opts.fastq_second.clone();
+    let threads = opts.threads;
+    let batch_size = opts.batch_size;
+    let bases = threads * batch_size;
+    let mut read_pair_iter = ReadPairIterator::new(fastq1, fastq2)?;
+    debug!(target: "UTILS", "Attempting to load {} bases", bases);
+    let read_pairs = read_pair_iter.take_bases(bases);
+    let n_read_pairs = read_pairs.len();
+    debug!(target: "UTILS", "Loaded {} read pairs", n_read_pairs);
+    if n_read_pairs == 0 {
+        Err(anyhow!("No read pairs found in the input files"))
+    } else {
+        Ok(n_read_pairs)
+    }
 }
 
 #[cfg(test)]

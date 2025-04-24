@@ -1,7 +1,6 @@
 use crate::cli;
-use crate::mapping_status::get_mapping_status;
-use crate::mapping_status::MappingStatus::*;
-use crate::read_pair_io::{MappedReadPair, ReadPair};
+use crate::read_types::{MappedReadPair, ReadPair};
+use crate::utils::process_and_write_alignments;
 use crate::utils::{
     check_directory_exists, check_file_exists, create_bgzf_fastq_writer, silence_stderr,
     FastqWriter,
@@ -9,7 +8,7 @@ use crate::utils::{
 use anyhow::{anyhow, Result};
 use bio::io::fastq;
 use bwa::BwaAligner;
-use log::{debug, warn};
+use log::debug;
 use rust_htslib::bam;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -123,38 +122,10 @@ impl Aligner {
 
         let alignments = self.align_reads(&reads, opts.threads)?;
 
-        let mut bam_write_count: usize = 0;
-        let mut fastq_write_count: usize = 0;
-        for input_pair in read_pairs {
-            let id = &input_pair.id;
-            if alignments.contains_key(id) {
-                let mapped_pair = alignments.get(id).unwrap();
-                let read1_status = get_mapping_status(&mapped_pair.read1, opts)?;
-                let read2_status = get_mapping_status(&mapped_pair.read2, opts)?;
-                match (read1_status, read2_status) {
-                    (Mapped, Mapped) => {
-                        continue;
-                    }
-                    (Suspicious, _) | (_, Suspicious) => {
-                        warn!("Read pair {} has a suspicious alignment", input_pair.id);
-                        continue;
-                    }
-                    _ => {
-                        for bam_record in mapped_pair.read1.iter() {
-                            self.bam_writer.write(bam_record)?;
-                            bam_write_count += 1;
-                        }
-                        for bam_record in mapped_pair.read2.iter() {
-                            self.bam_writer.write(bam_record)?;
-                            bam_write_count += 1;
-                        }
-                        self.fastq_writer_1.write_record(&input_pair.read1)?;
-                        self.fastq_writer_2.write_record(&input_pair.read2)?;
-                        fastq_write_count += 1;
-                    }
-                }
-            }
-        }
+        let (bam_write_count, fastq_write_count) =
+            process_and_write_alignments(&alignments, read_pairs, opts, &mut self.bam_writer,
+                &mut self.fastq_writer_1, &mut self.fastq_writer_2)?;
+        
         debug!(target: "IO", "Wrote {} alignments to {}", bam_write_count, self.bam_filename.display());
         debug!(target: "IO", "Wrote {} reads to {}", fastq_write_count, self.fastq_filename_1.display());
         debug!(target: "IO", "Wrote {} reads to {}", fastq_write_count, self.fastq_filename_2.display());
@@ -200,3 +171,4 @@ impl Aligner {
         }
     }
 }
+

@@ -2,13 +2,16 @@ use anyhow::{anyhow, Result};
 use bgzf::Writer as BgzfWriter;
 use bio::io::fastq;
 use rust_htslib::bam;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
-use log::debug;
+use log::{debug, warn};
 use crate::cli::ProgramOptions;
+use crate::mapping_status::get_mapping_status;
+use crate::mapping_status::MappingStatus::*;
 use crate::read_pair_io::ReadPairIterator;
+use crate::read_types::{MappedReadPair, ReadPair};
 
 /// Intercepts any stderr output from the wrapped function
 pub fn silence_stderr<T, F>(f: F) -> Result<T>
@@ -232,6 +235,50 @@ pub fn estimate_results_batch_size(opts: &ProgramOptions) -> Result<usize> {
     } else {
         Ok(n_read_pairs)
     }
+}
+
+pub fn process_and_write_alignments(
+    alignments: &BTreeMap<String, MappedReadPair>,
+    read_pairs: &[ReadPair],
+    opts: &ProgramOptions,
+    bam_writer: &mut bam::Writer,
+    fastq_writer_1: &mut FastqWriter,
+    fastq_writer_2: &mut FastqWriter,
+) -> Result<(usize, usize)> {
+    let mut bam_write_count: usize = 0;
+    let mut fastq_write_count: usize = 0;
+
+    for input_pair in read_pairs {
+        let id = &input_pair.id;
+        if alignments.contains_key(id) {
+            let mapped_pair = alignments.get(id).unwrap();
+            let read1_status = get_mapping_status(&mapped_pair.read1, opts)?;
+            let read2_status = get_mapping_status(&mapped_pair.read2, opts)?;
+            match (read1_status, read2_status) {
+                (Mapped, Mapped) => {
+                    continue;
+                }
+                (Suspicious, _) | (_, Suspicious) => {
+                    warn!("Read pair {} has a suspicious alignment", input_pair.id);
+                    continue;
+                }
+                _ => {
+                    for bam_record in mapped_pair.read1.iter() {
+                        bam_writer.write(bam_record)?;
+                        bam_write_count += 1;
+                    }
+                    for bam_record in mapped_pair.read2.iter() {
+                        bam_writer.write(bam_record)?;
+                        bam_write_count += 1;
+                    }
+                    fastq_writer_1.write_record(&input_pair.read1)?;
+                    fastq_writer_2.write_record(&input_pair.read2)?;
+                    fastq_write_count += 1;
+                }
+            }
+        }
+    }
+    Ok((bam_write_count, fastq_write_count))
 }
 
 #[cfg(test)]

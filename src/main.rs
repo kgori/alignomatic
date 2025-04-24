@@ -13,11 +13,13 @@ mod cli;
 mod mapping_status;
 mod output;
 mod read_pair_io;
+mod read_types;
 mod utils;
 
 use aligner::Aligner;
 use mapping_status::{get_mapping_status, MappingStatus::*};
-use read_pair_io::{MappedReadPair, ReadPairIterator};
+use read_types::MappedReadPair;
+use read_pair_io::ReadPairIterator;
 use utils::{bam_to_fastq, create_bgzf_fastq_writer, estimate_results_batch_size};
 
 fn main() -> Result<()> {

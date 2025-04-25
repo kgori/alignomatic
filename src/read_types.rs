@@ -68,6 +68,10 @@ impl MappedReadPair {
         }
     }
 
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     pub fn insert(&mut self, read: bam::Record) {
         if read.is_first_in_template() {
             self.read1.push(read);

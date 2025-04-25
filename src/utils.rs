@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Result};
-use bgzf::Writer as BgzfWriter;
 use bio::io::fastq;
 use rust_htslib::bam;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
@@ -11,7 +10,7 @@ use crate::cli::ProgramOptions;
 use crate::mapping_status::get_mapping_status;
 use crate::mapping_status::MappingStatus::*;
 use crate::read_pair_io::ReadPairIterator;
-use crate::read_types::{MappedReadPair, ReadPair};
+use crate::read_types::MappedReadPair;
 
 /// Intercepts any stderr output from the wrapped function
 pub fn silence_stderr<T, F>(f: F) -> Result<T>
@@ -166,15 +165,7 @@ pub fn check_directory_exists(dir: &Path) -> Result<()> {
     }
 }
 
-pub type FastqWriter = fastq::Writer<BgzfWriter<std::fs::File>>;
-
-pub fn create_bgzf_fastq_writer(path: &Path) -> Result<FastqWriter> {
-    let file = std::fs::File::create(path)?;
-    let bgzf_writer = BgzfWriter::new(file, 6.try_into()?);
-    Ok(fastq::Writer::new(bgzf_writer))
-}
-
-pub fn bam_to_fastq(record: bam::Record) -> Result<fastq::Record> {
+pub fn bam_to_fastq(record: &bam::Record) -> Result<fastq::Record> {
     if record.is_secondary() || record.is_supplementary() {
         return Err(anyhow!("Secondary or supplementary alignment"));
     }
@@ -237,48 +228,17 @@ pub fn estimate_results_batch_size(opts: &ProgramOptions) -> Result<usize> {
     }
 }
 
-pub fn process_and_write_alignments(
-    alignments: &BTreeMap<String, MappedReadPair>,
-    read_pairs: &[ReadPair],
-    opts: &ProgramOptions,
-    bam_writer: &mut bam::Writer,
-    fastq_writer_1: &mut FastqWriter,
-    fastq_writer_2: &mut FastqWriter,
-) -> Result<(usize, usize)> {
-    let mut bam_write_count: usize = 0;
-    let mut fastq_write_count: usize = 0;
-
-    for input_pair in read_pairs {
-        let id = &input_pair.id;
-        if alignments.contains_key(id) {
-            let mapped_pair = alignments.get(id).unwrap();
-            let read1_status = get_mapping_status(&mapped_pair.read1, opts)?;
-            let read2_status = get_mapping_status(&mapped_pair.read2, opts)?;
-            match (read1_status, read2_status) {
-                (Mapped, Mapped) => {
-                    continue;
-                }
-                (Suspicious, _) | (_, Suspicious) => {
-                    warn!("Read pair {} has a suspicious alignment", input_pair.id);
-                    continue;
-                }
-                _ => {
-                    for bam_record in mapped_pair.read1.iter() {
-                        bam_writer.write(bam_record)?;
-                        bam_write_count += 1;
-                    }
-                    for bam_record in mapped_pair.read2.iter() {
-                        bam_writer.write(bam_record)?;
-                        bam_write_count += 1;
-                    }
-                    fastq_writer_1.write_record(&input_pair.read1)?;
-                    fastq_writer_2.write_record(&input_pair.read2)?;
-                    fastq_write_count += 1;
-                }
-            }
-        }
+pub fn read_pair_is_unmapped(mapped_pair: &MappedReadPair, opts: &ProgramOptions) -> Result<bool> {
+    let read1_status = get_mapping_status(&mapped_pair.read1, opts)?;
+    let read2_status = get_mapping_status(&mapped_pair.read2, opts)?;
+    match (read1_status, read2_status) {
+        (Mapped, Mapped) => Ok(false),
+        (Suspicious, _) | (_, Suspicious) => {
+            warn!("Read pair {} has a suspicious alignment", mapped_pair.id());
+            Ok(false)
+        },
+        _ => Ok(true),
     }
-    Ok((bam_write_count, fastq_write_count))
 }
 
 #[cfg(test)]
@@ -307,7 +267,7 @@ mod test {
             }
             let first = bam_record.is_first_in_template();
             let last = bam_record.is_last_in_template();
-            let converted = bam_to_fastq(bam_record).unwrap();
+            let converted = bam_to_fastq(&bam_record).unwrap();
             if first && converted_1.len() < reference.len() {
                 converted_1.push(converted.clone());
             }

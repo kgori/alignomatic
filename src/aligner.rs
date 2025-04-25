@@ -1,6 +1,6 @@
 use crate::cli;
 use crate::read_types::{MappedReadPair, ReadPair};
-use crate::utils::process_and_write_alignments;
+use crate::utils::{read_pair_is_unmapped, write_mapped_pair_to_bam};
 use crate::utils::{
     check_directory_exists, check_file_exists, create_bgzf_fastq_writer, silence_stderr,
     FastqWriter,
@@ -122,10 +122,22 @@ impl Aligner {
 
         let alignments = self.align_reads(&reads, opts.threads)?;
 
-        let (bam_write_count, fastq_write_count) =
-            process_and_write_alignments(&alignments, read_pairs, opts, &mut self.bam_writer,
-                &mut self.fastq_writer_1, &mut self.fastq_writer_2)?;
+        let mut bam_write_count = 0;
+        let mut fastq_write_count = 0;
         
+        for input_pair in read_pairs {
+            let id = &input_pair.id;
+            if alignments.contains_key(id) {
+                let mapped_pair = alignments.get(id).unwrap();
+                if read_pair_is_unmapped(mapped_pair, opts)? {
+                    bam_write_count += write_mapped_pair_to_bam(&mut self.bam_writer, mapped_pair)?;
+                    self.fastq_writer_1.write_record(&input_pair.read1)?;
+                    self.fastq_writer_2.write_record(&input_pair.read2)?;
+                    fastq_write_count += 1;
+                }
+            }
+        }
+
         debug!(target: "IO", "Wrote {} alignments to {}", bam_write_count, self.bam_filename.display());
         debug!(target: "IO", "Wrote {} reads to {}", fastq_write_count, self.fastq_filename_1.display());
         debug!(target: "IO", "Wrote {} reads to {}", fastq_write_count, self.fastq_filename_2.display());
@@ -171,4 +183,3 @@ impl Aligner {
         }
     }
 }
-

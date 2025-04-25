@@ -1,7 +1,10 @@
-use crate::read_types::ReadPair;
-use anyhow::Result;
+use crate::read_types::{MappedReadPair, ReadPair};
+use crate::utils::bam_to_fastq;
+use anyhow::{anyhow, Result};
+use bgzf::Writer as BgzfWriter;
 use bio::io::fastq::{self, FastqRead};
 use log::debug;
+use rust_htslib::bam;
 use std::fs::File;
 use std::io;
 
@@ -79,14 +82,75 @@ impl Iterator for ReadPairIterator {
 
         if result1.is_ok() && result2.is_ok() {
             let read_pair = ReadPair::new(record1, record2);
-            if let Ok(read_pair) = read_pair {
-                Some(read_pair)
-            } else {
-                // error!("Failed to create a read pair: {:?}", read_pair.err());
-                None
-            }
+            read_pair.ok()
         } else {
             None
         }
     }
+}
+
+pub type FastqWriter = fastq::Writer<BgzfWriter<std::fs::File>>;
+
+pub fn create_bgzf_fastq_writer(path: &std::path::Path) -> Result<FastqWriter> {
+    let file = std::fs::File::create(path)?;
+    let bgzf_writer = BgzfWriter::new(file, 6.try_into()?);
+    Ok(fastq::Writer::new(bgzf_writer))
+}
+
+/// Writes all alignments (primary, secondary, and supplementary) of a mapped read pair to the BAM file.
+pub fn write_mapped_pair_to_bam(
+    bam_writer: &mut bam::Writer,
+    mapped_pair: &MappedReadPair,
+) -> Result<usize> {
+    let mut write_count = 0;
+
+    for bam_record in mapped_pair.read1.iter() {
+        bam_writer.write(bam_record)?;
+        write_count += 1;
+    }
+
+    for bam_record in mapped_pair.read2.iter() {
+        bam_writer.write(bam_record)?;
+        write_count += 1;
+    }
+
+    Ok(write_count)
+}
+
+/// Writes only the primary alignment of a mapped read pair to the FASTQ files.
+/// Errors if either read lacks a primary alignment.
+pub fn write_mapped_pair_to_fastq(
+    fastq_writer_1: &mut FastqWriter,
+    fastq_writer_2: &mut FastqWriter,
+    mapped_pair: &MappedReadPair,
+) -> Result<()> {
+    // Extract the primary alignment for read1
+    let primary_read1: Option<&bam::Record> = mapped_pair
+        .read1
+        .iter()
+        .find(|record| !record.is_secondary() && !record.is_supplementary());
+
+    // Extract the primary alignment for read2
+    let primary_read2: Option<&bam::Record> = mapped_pair
+        .read2
+        .iter()
+        .find(|record| !record.is_secondary() && !record.is_supplementary());
+
+    // Ensure both reads have primary alignments
+    if primary_read1.is_none() || primary_read2.is_none() {
+        return Err(anyhow!(
+            "Primary alignment missing for one or both reads in pair: {}",
+            mapped_pair.id()
+        ));
+    }
+
+    // Convert primary alignments to FASTQ records
+    let fastq_record1 = bam_to_fastq(primary_read1.unwrap())?;
+    let fastq_record2 = bam_to_fastq(primary_read2.unwrap())?;
+
+    // Write both FASTQ records
+    fastq_writer_1.write_record(&fastq_record1)?;
+    fastq_writer_2.write_record(&fastq_record2)?;
+
+    Ok(())
 }

@@ -323,7 +323,7 @@ fn convert_bam_to_fastq(alignments: &[bam::Record]) -> Result<fastq::Record> {
         if alignment.is_secondary() || alignment.is_supplementary() {
             continue;
         }
-        fastqs.push(bam_to_fastq(alignment.clone())?);
+        fastqs.push(bam_to_fastq(alignment)?);
     }
     match fastqs.len() {
         0 => Err(anyhow::anyhow!("No primary alignments")),

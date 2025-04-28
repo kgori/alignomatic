@@ -1,9 +1,9 @@
 use crate::cli;
+use crate::read_pair_io::{create_bgzf_fastq_writer, write_mapped_pair_to_bam, FastqWriter};
 use crate::read_types::{MappedReadPair, ReadPair};
-use crate::utils::{read_pair_is_unmapped, write_mapped_pair_to_bam};
+use crate::utils::read_pair_is_unmapped;
 use crate::utils::{
-    check_directory_exists, check_file_exists, create_bgzf_fastq_writer, silence_stderr,
-    FastqWriter,
+    check_directory_exists, check_file_exists, silence_stderr
 };
 use anyhow::{anyhow, Result};
 use bio::io::fastq;
@@ -161,7 +161,7 @@ impl Aligner {
             let name = std::str::from_utf8(r.qname())
                 .expect("Invalid UTF-8 in read name")
                 .to_string();
-            alignments
+            let _ = alignments
                 .entry(name.clone())
                 .or_insert_with(|| MappedReadPair::new(&name))
                 .insert(r);

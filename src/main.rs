@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
+use bam_io::CollatedBamReader;
 use bio::io::fastq;
-use log::{debug, error, info};
-use rust_htslib::bam;
+use log::{debug, error, info, warn};
+use rust_htslib::bam::{self, Read};
 use std::path::PathBuf;
 
 mod aligner;
@@ -11,7 +12,6 @@ mod bam_io;
 mod checkpoint;
 mod cli;
 mod mapping_status;
-mod output;
 mod read_pair_io;
 mod read_types;
 mod utils;
@@ -19,8 +19,8 @@ mod utils;
 use aligner::Aligner;
 use mapping_status::{get_mapping_status, MappingStatus::*};
 use read_types::MappedReadPair;
-use read_pair_io::ReadPairIterator;
-use utils::{bam_to_fastq, create_bgzf_fastq_writer, estimate_results_batch_size};
+use read_pair_io::{create_bgzf_fastq_writer, write_mapped_pair_to_bam, ReadPairIterator};
+use utils::{bam_to_fastq, extract_primary_read, read_pair_is_unmapped};
 
 fn main() -> Result<()> {
     if std::env::args().len() == 1 {
@@ -32,10 +32,12 @@ fn main() -> Result<()> {
 
     let opts: cli::ProgramOptions = cli::get_program_options()?;
 
-    let results_batch_size = estimate_results_batch_size(&opts)?;
-    debug!(target: "IO", "Estimated results batch size: {}", results_batch_size);
-    let bam_files = generate_alignments(&opts)?;
-    let result = post_process_alignments(&bam_files, &opts, results_batch_size);
+    let bam_files = if opts.bam_input.is_some() {
+        generate_alignments_from_bam(&opts)?
+    } else {
+        generate_alignments(&opts)?
+    };
+    let result = post_process_alignments(&bam_files, &opts, 100_000);
     if result.is_ok() {
         info!(target: "IO", "Finished processing alignments");
     } else {
@@ -45,15 +47,118 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn get_bam_header_from_bam(bamfile: &PathBuf) -> Result<bam::Header> {
+    let bam_reader = bam::Reader::from_path(bamfile)?;
+    let header = bam::Header::from_template(bam_reader.header());
+    Ok(header)
+}
+
+fn generate_alignments_from_bam(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
+    info!(target: "IO", "Accessing input BAM file from disk");
+
+    let workspace = opts.output_folder.join("workspace");
+    let mut bam_files = Vec::new();
+
+    let bam_header = get_bam_header_from_bam(&opts.bam_input.clone().unwrap())?;
+    let bam_writer_filename = workspace.join("initial_output.bam");
+    let mut bam_writer = bam::Writer::from_path(
+        bam_writer_filename.clone(),
+        &bam_header,
+        bam::Format::Bam,
+    )?;
+
+    let fastqout1_filename = workspace.join("initial_output.1.fq.gz");
+    let mut fastqout1 =
+        create_bgzf_fastq_writer(&fastqout1_filename)?;
+
+    let fastqout2_filename = workspace.join("initial_output.2.fq.gz");
+    let mut fastqout2 =
+        create_bgzf_fastq_writer(&fastqout2_filename)?;
+
+    info!(target: "IO", "Collating BAM file {}", opts.bam_input.clone().unwrap().display());
+    let bam_reader = CollatedBamReader::new(
+        opts.bam_input.clone().unwrap().as_path(),
+        Some(workspace.as_path()),
+        Some(opts.threads),
+    )?;
+
+    let mut bam_write_count = 0;
+    let mut fastq_write_count: usize = 0;
+    let mut seen_count: usize = 0;
+    
+    for mapped_pair in bam_reader {
+        seen_count += 1;
+        let mapped_pair = mapped_pair?;
+        if mapped_pair.read1.is_empty() || mapped_pair.read2.is_empty() {
+            warn!(target: "IO",
+                "Read pair {} is missing at least one of its pair. Skipping.",
+                mapped_pair.id());
+            continue;
+        }
+        if read_pair_is_unmapped(&mapped_pair, opts)? {
+            bam_write_count += write_mapped_pair_to_bam(&mut bam_writer, &mapped_pair)?;
+
+            // Find the primary alignment in mapped_pair.read1 and convert it to fastq
+            let primary_read1 = extract_primary_read(&mapped_pair.read1)?;
+            fastqout1.write_record(&primary_read1)?;
+
+            let primary_read2 = extract_primary_read(&mapped_pair.read2)?;
+            fastqout2.write_record(&primary_read2)?;
+
+            fastq_write_count += 1;
+
+            if fastq_write_count % 1_000_000 == 0 {
+                debug!(target: "IO",
+                    "Wrote {} reads to fastq files",
+                    fastq_write_count);
+            }
+        }
+        if seen_count % 1_000_000 == 0 {
+            debug!(target: "IO",
+                "Processed {} read pairs",
+                seen_count);
+        }
+    }
+
+    debug!(target: "IO",
+        "Wrote {} reads to BAM file and {} reads to fastq files",
+        bam_write_count,
+        fastq_write_count);
+
+    drop(bam_writer);
+
+    bam_files.push(bam_writer_filename);
+
+    process_with_index(
+        opts,
+        &mut bam_files,
+        fastqout1_filename,
+        fastqout2_filename,
+         workspace)?;
+    Ok(bam_files)
+}
+
 fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
     info!(target: "IO", "Accessing Fastq read pairs from disk");
+    let fastq1 = opts.fastq_first.clone().unwrap();
+    let fastq2 = opts.fastq_second.clone().unwrap();
 
     let mut bam_files = Vec::new();
-    let mut fastq1 = opts.fastq_first.clone();
-    let mut fastq2 = opts.fastq_second.clone();
 
     let workspace = opts.output_folder.join("workspace");
 
+    process_with_index(opts, &mut bam_files, fastq1, fastq2, workspace)?;
+
+    Ok(bam_files)
+}
+
+fn process_with_index(
+    opts: &cli::ProgramOptions,
+    bam_files: &mut Vec<PathBuf>,
+    mut fastq1: PathBuf,
+    mut fastq2: PathBuf,
+    workspace: PathBuf
+) -> Result<()> {
     for index in &opts.index {
         info!(target: "Aligner", "Loading index {}", index.display());
 
@@ -77,7 +182,10 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
         debug!(target: "Checkpoint", "Output fastq file 2: {}", fqout2.display());
 
         if checkpoint_file.exists() {
-            info!(target: "Checkpoint", "Checkpoint file found for index {}", index.display());
+            info!(target: "Checkpoint",
+                "Checkpoint file found for index {}",
+                index.display());
+
             let checkpoint_on_disk = checkpoint::read_checkpoint(&checkpoint_file)?;
             let checkpoint_computed = checkpoint::Checkpoint::create(
                 index, &fastq1, &fastq2, &bamfile, &fqout1, &fqout2, opts.batch_size,
@@ -90,12 +198,20 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
                 (fastq1, fastq2) = (fqout1, fqout2);
                 continue;
             } else {
-                info!(target: "Checkpoint", "Checkpoint mismatch for index {}. Recomputing alignment.", index.display());
-                debug!(target: "Checkpoint", "Checkpoint on disk: {:?}", checkpoint_on_disk);
-                debug!(target: "Checkpoint", "Checkpoint computed: {:?}", checkpoint_computed);
+                info!(target: "Checkpoint",
+                    "Checkpoint mismatch for index {}. Recomputing alignment.",
+                    index.display());
+                debug!(target: "Checkpoint",
+                    "Checkpoint on disk: {:?}",
+                    checkpoint_on_disk);
+                debug!(target: "Checkpoint",
+                    "Checkpoint computed: {:?}",
+                    checkpoint_computed);
             }
         } else {
-            info!(target: "Checkpoint", "Checkpoint not found for index {}. Computing alignment.", index.display());
+            info!(target: "Checkpoint",
+                "Checkpoint not found for index {}. Computing alignment.",
+                index.display());
         }
 
         // If we got here it means there is work to be done (no checkpoint file or hash mismatch)
@@ -119,16 +235,22 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
                 if n_read_pairs == 0 {
                     break;
                 } else {
-                    info!(target: "BWA", "Aligning {} read pairs", read_pairs.len());
+                    info!(target: "BWA",
+                        "Aligning {} read pairs",
+                        read_pairs.len());
                     aligner.process_batch(&read_pairs, opts)?;
                     n_readpairs_processed += n_read_pairs;
-                    info!(target: "BWA", "{} read pairs processed", n_readpairs_processed);
+                    info!(target: "BWA",
+                        "{} read pairs processed",
+                        n_readpairs_processed);
                 }
             }
         }
 
         // Write checkpoint file
-        info!(target: "Checkpoint", "Successfully completed. Writing checkpoint file for index {}", index.display());
+        info!(target: "Checkpoint",
+            "Successfully completed. Writing checkpoint file for index {}",
+            index.display());
         let ckpt =
             checkpoint::Checkpoint::create(index, &fastq1, &fastq2, &bamfile, &fqout1, &fqout2,
                 opts.batch_size, opts.min_block_size, opts.min_block_quality)?;
@@ -137,7 +259,7 @@ fn generate_alignments(opts: &cli::ProgramOptions) -> Result<Vec<PathBuf>> {
         (fastq1, fastq2) = (fqout1, fqout2);
     }
 
-    Ok(bam_files)
+    Ok(())
 }
 
 fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions, batch_size: usize) -> Result<()> {
@@ -201,7 +323,7 @@ fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions, ba
             let mapped_pair = alignments
                 .entry(read_name.clone())
                 .or_insert(MappedReadPair::new(&read_name));
-            mapped_pair.insert(record);
+            mapped_pair.insert(record)?;
         }
 
         for bam_reader in bam_readers.iter_mut() {
@@ -226,7 +348,7 @@ fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions, ba
                     } else {
                         check_map_read2.insert(read_name, true); // Mark as found
                     }
-                    mapped_pair.insert(record);
+                    mapped_pair.insert(record)?;
                 }
             }
 

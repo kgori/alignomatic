@@ -72,11 +72,21 @@ impl MappedReadPair {
         &self.id
     }
 
-    pub fn insert(&mut self, read: bam::Record) {
+    pub fn insert(&mut self, read: bam::Record) -> Result<()> {
+        let read_id = String::from_utf8_lossy(read.qname()).to_string();
+        if read_id != self.id {
+            return Err(anyhow!(
+                "Read IDs do not match: {} != {}",
+                read_id,
+                self.id
+            ));
+        }
         if read.is_first_in_template() {
             self.read1.push(read);
         } else {
             self.read2.push(read);
         }
+
+        Ok(())
     }
 }

@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use bio::io::fastq;
 use rust_htslib::bam;
 use std::collections::HashSet;
+use std::process::Command;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
@@ -211,8 +212,8 @@ pub fn normalize_path<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
 
 pub fn estimate_results_batch_size(opts: &ProgramOptions) -> Result<usize> {
     debug!(target: "UTILS", "Estimating batch size");
-    let fastq1 = opts.fastq_first.clone();
-    let fastq2 = opts.fastq_second.clone();
+    let fastq1 = opts.fastq_first.clone().unwrap();
+    let fastq2 = opts.fastq_second.clone().unwrap();
     let threads = opts.threads;
     let batch_size = opts.batch_size;
     let bases = threads * batch_size;
@@ -240,6 +241,123 @@ pub fn read_pair_is_unmapped(mapped_pair: &MappedReadPair, opts: &ProgramOptions
         _ => Ok(true),
     }
 }
+
+// RAII struct to ensure cleanup of FIFO on drop
+pub struct FifoGuard {
+    path: PathBuf,
+}
+
+impl FifoGuard {
+    pub fn new(path: &Path) -> Result<Self> {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+
+        let status = Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .map_err(|e| anyhow!("Failed to create FIFO: {}", e))?;
+
+        if !status.success() {
+            return Err(anyhow!("mkfifo failed with status: {}", status));
+        }
+
+        Ok(FifoGuard {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for FifoGuard {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+pub struct ProcessGuard {
+    process: std::process::Child,
+    finished: bool,
+}
+
+impl ProcessGuard {
+    pub fn new(process: std::process::Child) -> Self {
+        ProcessGuard {
+            process,
+            finished: false,
+        }
+    }
+
+    pub fn try_wait(&mut self) -> Result<bool> {
+        if self.finished {
+            return Ok(true);
+        }
+
+        match self.process.try_wait() {
+            Ok(Some(status)) => {
+                self.finished = true;
+                if status.success() {
+                    Ok(true)
+                } else {
+                    Err(anyhow!("Process exited with error: {}", status))
+                }
+            },
+            Ok(None) => Ok(false),
+            Err(e) => Err(anyhow!("Failed to wait for process: {}", e)),
+        }
+    }
+
+    pub fn wait(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+
+        let status = self.process.wait()?;
+
+        self.finished = true;
+
+        if !status.success() {
+            Err(anyhow!("Process exited with error: {}", status))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            // Try to wait for the process to finish gracefully
+            if self.process.wait().is_err() {
+                // If waiting fails, kill the process
+                let _ = self.process.kill();
+            }
+        }
+    }
+}
+
+pub fn extract_primary_read(records: &[bam::Record]) -> Result<fastq::Record> {
+    if records.is_empty() {
+        return Err(anyhow!("No records found"));
+    }
+    let primary_read = records
+        .iter()
+        .find(|record| !record.is_secondary() && !record.is_supplementary())
+        .map(bam_to_fastq);
+
+    match primary_read {
+        Some(Ok(read)) => Ok(read),
+        Some(Err(e)) => Err(anyhow!("Error converting BAM record to FASTQ: {}", e)),
+        None => {
+            for record in records {
+                eprintln!("Record: {:?}", record);
+            }
+            Err(anyhow!("No primary alignment found"))
+        },
+    }
+}
+
 
 #[cfg(test)]
 mod test {

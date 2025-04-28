@@ -1,5 +1,8 @@
+use std::{collections::VecDeque, env, path::Path, process::Command};
+
 use anyhow::{anyhow, Result};
 use rust_htslib::bam::{self, Read};
+use crate::{read_types::MappedReadPair, utils::{FifoGuard, ProcessGuard}};
 
 pub struct BufferedBamReader {
     reader: bam::Reader,
@@ -90,5 +93,158 @@ impl BufferedBamReader {
         }
 
         Ok(batch)
+    }
+}
+
+pub struct CollatedBamReader {
+    reader: bam::Reader,
+    current_batch: Option<MappedReadPair>,
+    buffer: VecDeque<bam::Record>,
+    _fifo_guard: FifoGuard,
+    process_guard: ProcessGuard,
+    exhausted: bool,
+}
+
+impl CollatedBamReader {
+    pub fn new(bam_path: &Path, temp_dir: Option<&Path>, threads: Option<usize>) -> Result<Self> {
+        // Get appropriate temp directory
+        let temp_dir = match temp_dir {
+            Some(dir) => dir.to_path_buf(),
+            None => env::temp_dir(),
+        };
+
+        // Generate a unique FIFO name
+        let pid = std::process::id();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let fifo_name = format!("collated_bam_{}_{}.fifo", timestamp, pid);
+        let fifo_path = temp_dir.join(fifo_name);
+
+        // Create the FIFO with automatic cleanup
+        let fifo_guard = FifoGuard::new(&fifo_path)?;
+
+        // Set up threading
+        let threads = match threads {
+            Some(0) => 1,
+            Some(t) => t,
+            None => 1,
+        };
+
+        // Start the samtools process
+        let process = Command::new("samtools")
+            .arg("collate")
+            .arg("-u")  // uncompressed BAM
+            .arg("-@").arg(threads.to_string())
+            .arg("-o").arg(&fifo_path)
+            .arg(bam_path)
+            .spawn()?;
+
+        let process_guard = ProcessGuard::new(process);
+
+        // Open the BAM file
+        let reader = bam::Reader::from_path(&fifo_path)?;
+
+        Ok(CollatedBamReader {
+            reader,
+            current_batch: None,
+            buffer: VecDeque::new(),
+            _fifo_guard: fifo_guard,
+            process_guard,
+            exhausted: false,
+        })
+    }
+
+    // Helper method to fill the buffer with reads
+    fn fill_buffer(&mut self) -> Result<bool> {
+        let mut record = bam::Record::new();
+        match self.reader.read(&mut record) {
+            Some(Ok(())) => {
+                self.buffer.push_back(record);
+                Ok(true)
+            },
+            Some(Err(e)) => Err(anyhow!("Error reading BAM record: {}", e)),
+            None => {
+                // No more records - check if process completed successfully
+                if !self.exhausted {
+                    self.exhausted = true;
+                    // Wait for process to complete and check status
+                    self.process_guard.wait()?;
+                }
+                Ok(false)
+            },
+        }
+    }
+
+    // Process reads with the same name
+    fn process_next_batch(&mut self) -> Result<Option<MappedReadPair>> {
+        // If buffer is empty, try to fill it
+        if self.buffer.is_empty() && !self.fill_buffer()? {
+            return Ok(None); // No more records
+        }
+
+        // Get the first record to determine the read name
+        let first_record = self.buffer.pop_front().unwrap();
+        let read_name = String::from_utf8_lossy(first_record.qname()).to_string();
+
+        // Create a new read pair
+        let mut read_pair = MappedReadPair::new(&read_name);
+        read_pair.insert(first_record)?;
+
+        // Process all reads with the same name
+        loop {
+            // Fill buffer if needed
+            if self.buffer.is_empty() && !self.fill_buffer()? {
+                break; // No more records to process
+            }
+
+            // Check if next record has the same name
+            if self.buffer.is_empty() {
+                break;
+            }
+
+            let peek_name = String::from_utf8_lossy(self.buffer[0].qname()).to_string();
+            if peek_name != read_name {
+                break; // Different read name, end of batch
+            }
+
+            // Add record to the batch
+            let record = self.buffer.pop_front().unwrap();
+            read_pair.insert(record)?;
+        }
+
+        Ok(Some(read_pair))
+    }
+
+    // Check if the samtools process has completed
+    pub fn process_finished(&mut self) -> Result<bool> {
+        self.process_guard.try_wait()
+    }
+}
+
+impl Iterator for CollatedBamReader {
+    type Item = Result<MappedReadPair>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Check if we've already encountered an error with the subprocess
+        if !self.exhausted && self.process_guard.try_wait().is_err() {
+            return Some(Err(anyhow!("samtools process failed")));
+        }
+
+        match self.process_next_batch() {
+            Ok(Some(pair)) => Some(Ok(pair)),
+            Ok(None) => {
+                // Double-check process status when we run out of records
+                if !self.exhausted {
+                    self.exhausted = true;
+                    if let Err(e) = self.process_guard.wait() {
+                        return Some(Err(e));
+                    }
+                }
+                None
+            },
+            Err(e) => Some(Err(e)),
+        }
     }
 }

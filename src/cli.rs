@@ -19,6 +19,14 @@ struct CliOptions {
     fastq_second: Option<PathBuf>,
 
     #[arg(
+        short = 'b',
+        long,
+        value_name = "FILE",
+        help = "Optional pre-aligned BAM file input. Overrides fastq_first and fastq_second if provided."
+    )]
+    bam_input: Option<PathBuf>,
+
+    #[arg(
         short = 'i',
         long,
         value_name = "FILES",
@@ -35,7 +43,7 @@ struct CliOptions {
     )]
     output_folder: Option<PathBuf>,
 
-    #[arg(short, long, help = "Batch size to process, in base pairs per thread. Default is 10000000.")]
+    #[arg(short = 'n', long, help = "Batch size to process, in base pairs per thread. Default is 10000000.")]
     batch_size: Option<usize>,
 
     #[arg(
@@ -62,6 +70,7 @@ struct CliOptions {
 struct ConfigFileOptions {
     fastq_first: Option<PathBuf>,
     fastq_second: Option<PathBuf>,
+    bam_input: Option<PathBuf>,
     index: Option<Vec<PathBuf>>,
     output_folder: Option<PathBuf>,
     batch_size: Option<usize>,
@@ -72,8 +81,9 @@ struct ConfigFileOptions {
 
 #[derive(Debug, Serialize)]
 pub struct ProgramOptions {
-    pub fastq_first: PathBuf,
-    pub fastq_second: PathBuf,
+    pub fastq_first: Option<PathBuf>,
+    pub fastq_second: Option<PathBuf>,
+    pub bam_input: Option<PathBuf>,
     pub index: Vec<PathBuf>,
     pub output_folder: PathBuf,
     pub batch_size: usize,
@@ -88,15 +98,14 @@ fn load_config(path: &PathBuf) -> ConfigFileOptions {
 }
 
 fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> Result<ProgramOptions> {
+    let bam_input = cli.bam_input.or(config.bam_input).map(normalize_path).transpose()?;
+    let fastq_first = cli.fastq_first.or(config.fastq_first).map(normalize_path).transpose()?;
+    let fastq_second = cli.fastq_second.or(config.fastq_second).map(normalize_path).transpose()?;
+
     let options = ProgramOptions {
-        fastq_first: normalize_path(cli
-            .fastq_first
-            .or(config.fastq_first)
-            .expect("No first fastq file provided"))?,
-        fastq_second: normalize_path(cli
-            .fastq_second
-            .or(config.fastq_second)
-            .expect("No second fastq file provided"))?,
+        fastq_first,
+        fastq_second,
+        bam_input,
         index: cli
             .index
             .or(config.index)
@@ -116,6 +125,7 @@ fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> Result<ProgramOp
             .or(config.min_block_quality)
             .unwrap_or(10.0),
     };
+
     Ok(options)
 }
 
@@ -128,8 +138,22 @@ fn write_config(config: &ProgramOptions) -> Result<()> {
 }
 
 fn check_options(opts: &ProgramOptions) -> Result<()> {
-    check_file_exists(&opts.fastq_first)?;
-    check_file_exists(&opts.fastq_second)?;
+    if opts.bam_input.is_none() && (opts.fastq_first.is_none() || opts.fastq_second.is_none()) {
+        return Err(anyhow!("Either bam_input or both fastq_first and fastq_second must be provided."));
+    }
+
+    if let Some(bam_input) = &opts.bam_input {
+        check_file_exists(bam_input)?;
+    }
+
+    if let Some(fastq_first) = &opts.fastq_first {
+        check_file_exists(fastq_first)?;
+    }
+
+    if let Some(fastq_second) = &opts.fastq_second {
+        check_file_exists(fastq_second)?;
+    }
+
     opts.index
         .iter()
         .try_for_each(|reference_file| -> Result<()> {

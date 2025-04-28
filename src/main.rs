@@ -134,7 +134,7 @@ fn generate_alignments_from_bam(opts: &cli::ProgramOptions) -> Result<Vec<PathBu
         &mut bam_files,
         fastqout1_filename,
         fastqout2_filename,
-         workspace)?;
+        workspace)?;
     Ok(bam_files)
 }
 

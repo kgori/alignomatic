@@ -136,6 +136,7 @@ impl CollatedBamReader {
         let process = Command::new("samtools")
             .arg("collate")
             .arg("-u")  // uncompressed BAM
+            .arg("-f")  // Primary alignments only
             .arg("-@").arg(threads.to_string())
             .arg("-o").arg(&fifo_path)
             .arg(bam_path)

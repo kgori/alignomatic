@@ -23,12 +23,36 @@ use read_pair_io::{create_bgzf_fastq_writer, write_mapped_pair_to_bam, ReadPairI
 use utils::{bam_to_fastq, extract_primary_read, read_pair_is_unmapped};
 
 fn main() -> Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("<unnamed>");
+        eprintln!("\n Panic in thread '{}'", name);
+
+        if let Some(location) = info.location() {
+            eprintln!(
+                "At {}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            );
+        }
+
+        if let Some(s) = info.payload().downcast_ref::<&str>() {
+            eprintln!("Panic message: {}", s);
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            eprintln!("Panic message: {}", s);
+        } else {
+            eprintln!("Panic occurred but couldn't extract the message.");
+        }
+    }));
+
     if std::env::args().len() == 1 {
         println!("No arguments provided. Use --help for usage information.");
         std::process::exit(0);
     }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    debug!(target: "LOG", "Debug logging enabled");
 
     let opts: cli::ProgramOptions = cli::get_program_options()?;
 
@@ -59,73 +83,101 @@ fn generate_alignments_from_bam(opts: &cli::ProgramOptions) -> Result<Vec<PathBu
     let workspace = opts.output_folder.join("workspace");
     let mut bam_files = Vec::new();
 
-    let bam_header = get_bam_header_from_bam(&opts.bam_input.clone().unwrap())?;
+    // Name the output files
     let bam_writer_filename = workspace.join("initial_output.bam");
-    let mut bam_writer = bam::Writer::from_path(
-        bam_writer_filename.clone(),
-        &bam_header,
-        bam::Format::Bam,
-    )?;
-
     let fastqout1_filename = workspace.join("initial_output.1.fq.gz");
-    let mut fastqout1 =
-        create_bgzf_fastq_writer(&fastqout1_filename)?;
-
     let fastqout2_filename = workspace.join("initial_output.2.fq.gz");
-    let mut fastqout2 =
-        create_bgzf_fastq_writer(&fastqout2_filename)?;
 
-    info!(target: "IO", "Collating BAM file {}", opts.bam_input.clone().unwrap().display());
-    let bam_reader = CollatedBamReader::new(
-        opts.bam_input.clone().unwrap().as_path(),
-        Some(workspace.as_path()),
-        Some(opts.threads),
-    )?;
+    { // Introduce a scope to make sure files are finalised
+        let bam_header = get_bam_header_from_bam(&opts.bam_input.clone().unwrap())?;
+        let mut bam_writer = bam::Writer::from_path(
+            bam_writer_filename.clone(),
+            &bam_header,
+            bam::Format::Bam,
+        )?;
 
-    let mut bam_write_count = 0;
-    let mut fastq_write_count: usize = 0;
-    let mut seen_count: usize = 0;
-    
-    for mapped_pair in bam_reader {
-        seen_count += 1;
-        let mapped_pair = mapped_pair?;
-        if mapped_pair.read1.is_empty() || mapped_pair.read2.is_empty() {
-            warn!(target: "IO",
-                "Read pair {} is missing at least one of its pair. Skipping.",
-                mapped_pair.id());
-            continue;
-        }
-        if read_pair_is_unmapped(&mapped_pair, opts)? {
-            bam_write_count += write_mapped_pair_to_bam(&mut bam_writer, &mapped_pair)?;
+        let mut fastqout1 =
+            create_bgzf_fastq_writer(&fastqout1_filename)?;
 
-            // Find the primary alignment in mapped_pair.read1 and convert it to fastq
-            let primary_read1 = extract_primary_read(&mapped_pair.read1)?;
-            fastqout1.write_record(&primary_read1)?;
+        let mut fastqout2 =
+            create_bgzf_fastq_writer(&fastqout2_filename)?;
 
-            let primary_read2 = extract_primary_read(&mapped_pair.read2)?;
-            fastqout2.write_record(&primary_read2)?;
+        info!(target: "IO", "Collating BAM file {}", opts.bam_input.clone().unwrap().display());
+        let bam_reader = CollatedBamReader::new(
+            opts.bam_input.clone().unwrap().as_path(),
+            Some(workspace.as_path()),
+            Some(opts.threads),
+        )?;
 
-            fastq_write_count += 1;
+        let mut bam_write_count = 0;
+        let mut fastq_write_count: usize = 0;
+        let mut seen_count: usize = 0;
 
-            if fastq_write_count % 1_000_000 == 0 {
-                debug!(target: "IO",
-                    "Wrote {} reads to fastq files",
-                    fastq_write_count);
+        for mapped_pair in bam_reader {
+            seen_count += 1;
+            let mapped_pair = mapped_pair?;
+            if mapped_pair.read1.is_empty() || mapped_pair.read2.is_empty() {
+                warn!(target: "IO",
+                    "Read pair {} is missing at least one of its pair. Skipping.",
+                    mapped_pair.id());
+                continue;
+            }
+            for r in mapped_pair.read1.iter() {
+                if r.seq().is_empty() {
+                    warn!(target: "IO",
+                        "Read {} is missing its sequence. Skipping.",
+                        String::from_utf8_lossy(r.qname()));
+                }
+                if r.qual().is_empty() {
+                    warn!(target: "IO",
+                        "Read {} is missing its quality. Skipping.",
+                        String::from_utf8_lossy(r.qname()));
+                }
+            }
+
+            for r in mapped_pair.read2.iter() {
+                if r.seq().is_empty() {
+                    warn!(target: "IO",
+                        "Read {} is missing its sequence. Skipping.",
+                        String::from_utf8_lossy(r.qname()));
+                }
+                if r.qual().is_empty() {
+                    warn!(target: "IO",
+                        "Read {} is missing its quality. Skipping.",
+                        String::from_utf8_lossy(r.qname()));
+                }
+            }
+
+            if read_pair_is_unmapped(&mapped_pair, opts)? {
+                bam_write_count += write_mapped_pair_to_bam(&mut bam_writer, &mapped_pair)?;
+
+                // Find the primary alignment in mapped_pair.read1 and convert it to fastq
+                let primary_read1 = extract_primary_read(&mapped_pair.read1)?;
+                fastqout1.write_record(&primary_read1)?;
+
+                let primary_read2 = extract_primary_read(&mapped_pair.read2)?;
+                fastqout2.write_record(&primary_read2)?;
+
+                fastq_write_count += 1;
+
+                if fastq_write_count % 1_000_000 == 0 {
+                    debug!(target: "IO",
+                        "Wrote {} reads to fastq files",
+                        fastq_write_count);
+                }
+            }
+            if seen_count % 1_000_000 == 0 {
+                info!(target: "IO",
+                    "Processed {} read pairs",
+                    seen_count);
             }
         }
-        if seen_count % 1_000_000 == 0 {
-            debug!(target: "IO",
-                "Processed {} read pairs",
-                seen_count);
-        }
+
+        debug!(target: "IO",
+            "Wrote {} reads to BAM file and {} reads to fastq files",
+            bam_write_count,
+            fastq_write_count);
     }
-
-    debug!(target: "IO",
-        "Wrote {} reads to BAM file and {} reads to fastq files",
-        bam_write_count,
-        fastq_write_count);
-
-    drop(bam_writer);
 
     bam_files.push(bam_writer_filename);
 

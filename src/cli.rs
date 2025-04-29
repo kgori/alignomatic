@@ -187,6 +187,7 @@ fn check_options(opts: &ProgramOptions) -> Result<()> {
 
     info!(target: "PARAMS", "First fastq file: {:?}", opts.fastq_first);
     info!(target: "PARAMS", "Second fastq file: {:?}", opts.fastq_second);
+    info!(target: "PARAMS", "BAM file: {:?}", opts.bam_input);
     info!(target: "PARAMS", "Index files:");
     for index in &opts.index {
         info!(target: "PARAMS", "{}", index.to_string_lossy());

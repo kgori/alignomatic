@@ -2,7 +2,6 @@
 *.fq
 *.fq.gz
 *.log
-data/
 refs/
 *.sh
 *_output/

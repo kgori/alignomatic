@@ -5,3 +5,6 @@
 refs/
 *.sh
 *_output/
+
+!data/test.1.fq.gz
+!data/test.2.fq.gz

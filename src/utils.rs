@@ -1,17 +1,17 @@
-use anyhow::{anyhow, Result};
-use bio::io::fastq;
-use rust_htslib::bam;
-use std::collections::HashSet;
-use std::process::Command;
-use std::fs::File;
-use std::os::unix::io::AsRawFd;
-use std::path::{Component, Path, PathBuf};
-use log::{debug, warn};
 use crate::cli::ProgramOptions;
 use crate::mapping_status::get_mapping_status;
 use crate::mapping_status::MappingStatus::*;
 use crate::read_pair_io::ReadPairIterator;
 use crate::read_types::MappedReadPair;
+use anyhow::{anyhow, Result};
+use bio::io::fastq;
+use log::{debug, warn};
+use rust_htslib::bam;
+use std::collections::HashSet;
+use std::fs::File;
+use std::os::unix::io::AsRawFd;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 /// Intercepts any stderr output from the wrapped function
 pub fn silence_stderr<T, F>(f: F) -> Result<T>
@@ -195,9 +195,7 @@ pub fn normalize_path<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
             Component::ParentDir => {
                 stack.pop();
             }
-            Component::CurDir => {
-
-            }
+            Component::CurDir => {}
             _ => stack.push(component),
         }
     }
@@ -237,7 +235,7 @@ pub fn read_pair_is_unmapped(mapped_pair: &MappedReadPair, opts: &ProgramOptions
         (Suspicious, _) | (_, Suspicious) => {
             warn!("Read pair {} has a suspicious alignment", mapped_pair.id());
             Ok(false)
-        },
+        }
         _ => Ok(true),
     }
 }
@@ -302,7 +300,7 @@ impl ProcessGuard {
                 } else {
                     Err(anyhow!("Process exited with error: {}", status))
                 }
-            },
+            }
             Ok(None) => Ok(false),
             Err(e) => Err(anyhow!("Failed to wait for process: {}", e)),
         }
@@ -354,10 +352,9 @@ pub fn extract_primary_read(records: &[bam::Record]) -> Result<fastq::Record> {
                 eprintln!("Record: {:?}", record);
             }
             Err(anyhow!("No primary alignment found"))
-        },
+        }
     }
 }
-
 
 #[cfg(test)]
 mod test {

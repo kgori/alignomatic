@@ -43,7 +43,11 @@ struct CliOptions {
     )]
     output_folder: Option<PathBuf>,
 
-    #[arg(short = 'n', long, help = "Batch size to process, in base pairs per thread. Default is 10000000.")]
+    #[arg(
+        short = 'n',
+        long,
+        help = "Batch size to process, in base pairs per thread. Default is 10000000."
+    )]
     batch_size: Option<usize>,
 
     #[arg(
@@ -98,9 +102,21 @@ fn load_config(path: &PathBuf) -> ConfigFileOptions {
 }
 
 fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> Result<ProgramOptions> {
-    let bam_input = cli.bam_input.or(config.bam_input).map(normalize_path).transpose()?;
-    let fastq_first = cli.fastq_first.or(config.fastq_first).map(normalize_path).transpose()?;
-    let fastq_second = cli.fastq_second.or(config.fastq_second).map(normalize_path).transpose()?;
+    let bam_input = cli
+        .bam_input
+        .or(config.bam_input)
+        .map(normalize_path)
+        .transpose()?;
+    let fastq_first = cli
+        .fastq_first
+        .or(config.fastq_first)
+        .map(normalize_path)
+        .transpose()?;
+    let fastq_second = cli
+        .fastq_second
+        .or(config.fastq_second)
+        .map(normalize_path)
+        .transpose()?;
 
     let options = ProgramOptions {
         fastq_first,
@@ -113,10 +129,11 @@ fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> Result<ProgramOp
             .iter()
             .map(normalize_path)
             .collect::<Result<Vec<PathBuf>>>()?,
-        output_folder: normalize_path(cli
-            .output_folder
-            .or(config.output_folder)
-            .expect("No output folder provided"))?,
+        output_folder: normalize_path(
+            cli.output_folder
+                .or(config.output_folder)
+                .expect("No output folder provided"),
+        )?,
         batch_size: cli.batch_size.or(config.batch_size).unwrap_or(10_000_000),
         threads: cli.threads.or(config.threads).unwrap_or(1),
         min_block_size: cli.min_block_size.or(config.min_block_size).unwrap_or(30),
@@ -139,7 +156,9 @@ fn write_config(config: &ProgramOptions) -> Result<()> {
 
 fn check_options(opts: &ProgramOptions) -> Result<()> {
     if opts.bam_input.is_none() && (opts.fastq_first.is_none() || opts.fastq_second.is_none()) {
-        return Err(anyhow!("Either bam_input or both fastq_first and fastq_second must be provided."));
+        return Err(anyhow!(
+            "Either bam_input or both fastq_first and fastq_second must be provided."
+        ));
     }
 
     if let Some(bam_input) = &opts.bam_input {

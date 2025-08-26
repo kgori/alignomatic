@@ -18,8 +18,8 @@ mod utils;
 
 use aligner::Aligner;
 use mapping_status::{get_mapping_status, MappingStatus::*};
-use read_types::MappedReadPair;
 use read_pair_io::{create_bgzf_fastq_writer, write_mapped_pair_to_bam, ReadPairIterator};
+use read_types::MappedReadPair;
 use utils::{bam_to_fastq, extract_primary_read, read_pair_is_unmapped};
 
 fn main() -> Result<()> {
@@ -88,19 +88,15 @@ fn generate_alignments_from_bam(opts: &cli::ProgramOptions) -> Result<Vec<PathBu
     let fastqout1_filename = workspace.join("initial_output.1.fq.gz");
     let fastqout2_filename = workspace.join("initial_output.2.fq.gz");
 
-    { // Introduce a scope to make sure files are finalised
+    {
+        // Introduce a scope to make sure files are finalised
         let bam_header = get_bam_header_from_bam(&opts.bam_input.clone().unwrap())?;
-        let mut bam_writer = bam::Writer::from_path(
-            bam_writer_filename.clone(),
-            &bam_header,
-            bam::Format::Bam,
-        )?;
+        let mut bam_writer =
+            bam::Writer::from_path(bam_writer_filename.clone(), &bam_header, bam::Format::Bam)?;
 
-        let mut fastqout1 =
-            create_bgzf_fastq_writer(&fastqout1_filename)?;
+        let mut fastqout1 = create_bgzf_fastq_writer(&fastqout1_filename)?;
 
-        let mut fastqout2 =
-            create_bgzf_fastq_writer(&fastqout2_filename)?;
+        let mut fastqout2 = create_bgzf_fastq_writer(&fastqout2_filename)?;
 
         info!(target: "IO", "Collating BAM file {}", opts.bam_input.clone().unwrap().display());
         let bam_reader = CollatedBamReader::new(
@@ -186,7 +182,8 @@ fn generate_alignments_from_bam(opts: &cli::ProgramOptions) -> Result<Vec<PathBu
         &mut bam_files,
         fastqout1_filename,
         fastqout2_filename,
-        workspace)?;
+        workspace,
+    )?;
     Ok(bam_files)
 }
 
@@ -209,7 +206,7 @@ fn process_with_index(
     bam_files: &mut Vec<PathBuf>,
     mut fastq1: PathBuf,
     mut fastq2: PathBuf,
-    workspace: PathBuf
+    workspace: PathBuf,
 ) -> Result<()> {
     for index in &opts.index {
         info!(target: "Aligner", "Loading index {}", index.display());
@@ -240,8 +237,15 @@ fn process_with_index(
 
             let checkpoint_on_disk = checkpoint::read_checkpoint(&checkpoint_file)?;
             let checkpoint_computed = checkpoint::Checkpoint::create(
-                index, &fastq1, &fastq2, &bamfile, &fqout1, &fqout2, opts.batch_size,
-                opts.min_block_size, opts.min_block_quality,
+                index,
+                &fastq1,
+                &fastq2,
+                &bamfile,
+                &fqout1,
+                &fqout2,
+                opts.batch_size,
+                opts.min_block_size,
+                opts.min_block_quality,
             )?;
 
             if checkpoint_on_disk.matches(&checkpoint_computed) {
@@ -270,7 +274,8 @@ fn process_with_index(
         // Create the aligner
         {
             let mut aligner = Aligner::new(
-                index, &workspace,
+                index,
+                &workspace,
                 Some(opts.threads), // Writing threads: use multiple threads for writing and aligning
             )?;
             info!(target: "Aligner", "Aligning reads to index {}", index.display());
@@ -303,9 +308,17 @@ fn process_with_index(
         info!(target: "Checkpoint",
             "Successfully completed. Writing checkpoint file for index {}",
             index.display());
-        let ckpt =
-            checkpoint::Checkpoint::create(index, &fastq1, &fastq2, &bamfile, &fqout1, &fqout2,
-                opts.batch_size, opts.min_block_size, opts.min_block_quality)?;
+        let ckpt = checkpoint::Checkpoint::create(
+            index,
+            &fastq1,
+            &fastq2,
+            &bamfile,
+            &fqout1,
+            &fqout2,
+            opts.batch_size,
+            opts.min_block_size,
+            opts.min_block_quality,
+        )?;
         checkpoint::write_checkpoint(&ckpt, &checkpoint_file)?;
         bam_files.push(bamfile);
         (fastq1, fastq2) = (fqout1, fqout2);
@@ -314,7 +327,11 @@ fn process_with_index(
     Ok(())
 }
 
-fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions, batch_size: usize) -> Result<()> {
+fn post_process_alignments(
+    bam_files: &[PathBuf],
+    opts: &cli::ProgramOptions,
+    batch_size: usize,
+) -> Result<()> {
     let final_bamfile = bam_files.last().unwrap();
     let mut final_bam =
         bam_io::BufferedBamReader::new(bam::Reader::from_path(final_bamfile).unwrap());
@@ -429,7 +446,7 @@ fn post_process_alignments(bam_files: &[PathBuf], opts: &cli::ProgramOptions, ba
             let status1 = get_mapping_status(&read_pair.read1, opts)?;
             let status2 = get_mapping_status(&read_pair.read2, opts)?;
             match (status1, status2) {
-                (Mapped, Mapped) => { }
+                (Mapped, Mapped) => {}
                 (Unmapped, Unmapped) => {
                     let f1 = convert_bam_to_fastq(&read_pair.read1)?;
                     let f2 = convert_bam_to_fastq(&read_pair.read2)?;

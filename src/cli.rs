@@ -6,6 +6,11 @@ use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+static DEFAULT_BATCH_SIZE: usize = 10_000_000;
+static DEFAULT_THREADS: usize = 1;
+static DEFAULT_MIN_BLOCK_SIZE: usize = 30;
+static DEFAULT_MIN_BLOCK_QUALITY: f32 = 10.0;
+
 #[derive(Parser)]
 struct CliOptions {
     /// Optional path to a config file (JSON format)
@@ -46,26 +51,26 @@ struct CliOptions {
     #[arg(
         short = 'n',
         long,
-        help = "Batch size to process, in base pairs per thread. Default is 10000000."
+        help = format!("Batch size to process, in base pairs per thread. Default is {}.", DEFAULT_BATCH_SIZE)
     )]
     batch_size: Option<usize>,
 
     #[arg(
         short,
         long,
-        help = "Number of threads to use. One thread will be reserved for the main program; any extra threads will be used for read mapping."
+        help = format!("Number of threads to use. One thread will be reserved for the main program; any extra threads will be used for read mapping. Default is {}.", DEFAULT_THREADS)
     )]
     threads: Option<usize>,
 
     #[arg(
         long,
-        help = "Minimum size of a block of bases that will be considered unmapped."
+        help = format!("Minimum size of a block of bases that will be considered unmapped. Default is {}.", DEFAULT_MIN_BLOCK_SIZE)
     )]
     min_block_size: Option<usize>,
 
     #[arg(
         long,
-        help = "Minimum average base quality of a block of bases that will be considered unmapped."
+        help = format!("Minimum average base quality of a block of bases that will be considered unmapped. Default is {}.", DEFAULT_MIN_BLOCK_QUALITY)
     )]
     min_block_quality: Option<f32>,
 }
@@ -134,13 +139,19 @@ fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> Result<ProgramOp
                 .or(config.output_folder)
                 .expect("No output folder provided"),
         )?,
-        batch_size: cli.batch_size.or(config.batch_size).unwrap_or(10_000_000),
-        threads: cli.threads.or(config.threads).unwrap_or(1),
-        min_block_size: cli.min_block_size.or(config.min_block_size).unwrap_or(30),
+        batch_size: cli
+            .batch_size
+            .or(config.batch_size)
+            .unwrap_or(DEFAULT_BATCH_SIZE),
+        threads: cli.threads.or(config.threads).unwrap_or(DEFAULT_THREADS),
+        min_block_size: cli
+            .min_block_size
+            .or(config.min_block_size)
+            .unwrap_or(DEFAULT_MIN_BLOCK_SIZE),
         min_block_quality: cli
             .min_block_quality
             .or(config.min_block_quality)
-            .unwrap_or(10.0),
+            .unwrap_or(DEFAULT_MIN_BLOCK_QUALITY),
     };
 
     Ok(options)

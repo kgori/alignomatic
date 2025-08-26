@@ -1,8 +1,11 @@
 use std::{collections::VecDeque, env, path::Path, process::Command};
 
+use crate::{
+    read_types::MappedReadPair,
+    utils::{FifoGuard, ProcessGuard},
+};
 use anyhow::{anyhow, Result};
 use rust_htslib::bam::{self, Read};
-use crate::{read_types::MappedReadPair, utils::{FifoGuard, ProcessGuard}};
 
 pub struct BufferedBamReader {
     reader: bam::Reader,
@@ -135,10 +138,12 @@ impl CollatedBamReader {
         // Start the samtools process
         let process = Command::new("samtools")
             .arg("collate")
-            .arg("-u")  // uncompressed BAM
-            .arg("-f")  // Primary alignments only
-            .arg("-@").arg(threads.to_string())
-            .arg("-o").arg(&fifo_path)
+            .arg("-u") // uncompressed BAM
+            .arg("-f") // Primary alignments only
+            .arg("-@")
+            .arg(threads.to_string())
+            .arg("-o")
+            .arg(&fifo_path)
             .arg(bam_path)
             .spawn()?;
 
@@ -164,7 +169,7 @@ impl CollatedBamReader {
             Some(Ok(())) => {
                 self.buffer.push_back(record);
                 Ok(true)
-            },
+            }
             Some(Err(e)) => Err(anyhow!("Error reading BAM record: {}", e)),
             None => {
                 // No more records - check if process completed successfully
@@ -174,7 +179,7 @@ impl CollatedBamReader {
                     self.process_guard.wait()?;
                 }
                 Ok(false)
-            },
+            }
         }
     }
 
@@ -244,7 +249,7 @@ impl Iterator for CollatedBamReader {
                     }
                 }
                 None
-            },
+            }
             Err(e) => Some(Err(e)),
         }
     }

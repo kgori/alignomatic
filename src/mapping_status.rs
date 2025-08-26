@@ -58,8 +58,7 @@ pub fn get_mapping_status(records: &[bam::Record], opts: &ProgramOptions) -> Res
     let first_or_second = records[0].is_first_in_template();
     let len = records[0].seq_len();
 
-    let mut positions: HashSet<usize> =
-        get_clipped_positions(records[0]).iter().cloned().collect();
+    let mut positions: HashSet<usize> = get_clipped_positions(records[0]).iter().cloned().collect();
 
     for record in &records[1..] {
         if record.qname() != read_name {

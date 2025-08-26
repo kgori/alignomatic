@@ -2,9 +2,7 @@ use crate::cli;
 use crate::read_pair_io::{create_bgzf_fastq_writer, write_mapped_pair_to_bam, FastqWriter};
 use crate::read_types::{MappedReadPair, ReadPair};
 use crate::utils::read_pair_is_unmapped;
-use crate::utils::{
-    check_directory_exists, check_file_exists, silence_stderr
-};
+use crate::utils::{check_directory_exists, check_file_exists, silence_stderr};
 use anyhow::{anyhow, Result};
 use bio::io::fastq;
 use bwa::BwaAligner;
@@ -124,7 +122,7 @@ impl Aligner {
 
         let mut bam_write_count = 0;
         let mut fastq_write_count = 0;
-        
+
         for input_pair in read_pairs {
             let id = &input_pair.id;
             if alignments.contains_key(id) {
@@ -152,10 +150,8 @@ impl Aligner {
     ) -> Result<BTreeMap<String, MappedReadPair>> {
         debug!(target: "BWA", "Aligning {} reads", reads.len());
         let mut alignments = BTreeMap::new();
-        let bwa_result = silence_stderr(|| {
-            self.aligner
-                .align_fastq_records(reads, true, true, threads)
-        })??;
+        let bwa_result =
+            silence_stderr(|| self.aligner.align_fastq_records(reads, true, true, threads))??;
 
         bwa_result.into_iter().for_each(|r| {
             let name = std::str::from_utf8(r.qname())

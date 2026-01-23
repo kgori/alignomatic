@@ -1,6 +1,7 @@
 name: Dev tag tests
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*-dev.*"

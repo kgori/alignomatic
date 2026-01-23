@@ -30,10 +30,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-rust@v1
+      - uses: actions-rs/toolchain@v1
         with:
-          rust-version: stable
-          components: clippy, rustfmt
+          toolchain: stable
+          override: true
+          components: clippy,rustfmt
 
       - name: Build release binary
         run: cargo build --release

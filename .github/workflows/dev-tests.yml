@@ -1,0 +1,19 @@
+name: Dev tag tests
+
+on:
+  push:
+    tags:
+      - "v*-dev.*"
+
+jobs:
+  test:
+    name: Run tests (dev tag)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --all

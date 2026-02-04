@@ -57,7 +57,11 @@ fn main() -> Result<()> {
     let opts: cli::ProgramOptions = cli::get_program_options()?;
 
     let bam_files = if opts.bam_input.is_some() {
-        generate_alignments_from_bam(&opts)?
+        if opts.index.is_empty() {
+            vec![opts.bam_input.clone().unwrap()]
+        } else {
+            generate_alignments_from_bam(&opts)?
+        }
     } else {
         generate_alignments(&opts)?
     };

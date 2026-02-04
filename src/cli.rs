@@ -130,7 +130,7 @@ fn merge_options(cli: CliOptions, config: ConfigFileOptions) -> Result<ProgramOp
         index: cli
             .index
             .or(config.index)
-            .expect("No index files provided")
+            .unwrap_or_default()
             .iter()
             .map(normalize_path)
             .collect::<Result<Vec<PathBuf>>>()?,
@@ -182,6 +182,16 @@ fn check_options(opts: &ProgramOptions) -> Result<()> {
 
     if let Some(fastq_second) = &opts.fastq_second {
         check_file_exists(fastq_second)?;
+    }
+
+    if opts.index.is_empty() {
+        if opts.bam_input.is_some() {
+            info!(target: "PARAMS", "No index files provided. Skipping alignment step.");
+        } else {
+            return Err(anyhow!(
+                "Index files must be provided when using FASTQ input."
+            ));
+        }
     }
 
     opts.index

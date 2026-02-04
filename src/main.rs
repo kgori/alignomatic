@@ -57,11 +57,7 @@ fn main() -> Result<()> {
     let opts: cli::ProgramOptions = cli::get_program_options()?;
 
     let bam_files = if opts.bam_input.is_some() {
-        if opts.index.is_empty() {
-            vec![opts.bam_input.clone().unwrap()]
-        } else {
-            generate_alignments_from_bam(&opts)?
-        }
+        generate_alignments_from_bam(&opts)?
     } else {
         generate_alignments(&opts)?
     };
@@ -98,9 +94,17 @@ fn generate_alignments_from_bam(opts: &cli::ProgramOptions) -> Result<Vec<PathBu
         let mut bam_writer =
             bam::Writer::from_path(bam_writer_filename.clone(), &bam_header, bam::Format::Bam)?;
 
-        let mut fastqout1 = create_bgzf_fastq_writer(&fastqout1_filename)?;
+        let mut fastqout1 = if !opts.index.is_empty() {
+            Some(create_bgzf_fastq_writer(&fastqout1_filename)?)
+        } else {
+            None
+        };
 
-        let mut fastqout2 = create_bgzf_fastq_writer(&fastqout2_filename)?;
+        let mut fastqout2 = if !opts.index.is_empty() {
+            Some(create_bgzf_fastq_writer(&fastqout2_filename)?)
+        } else {
+            None
+        };
 
         info!(target: "IO", "Collating BAM file {}", opts.bam_input.clone().unwrap().display());
         let bam_reader = CollatedBamReader::new(
@@ -151,16 +155,19 @@ fn generate_alignments_from_bam(opts: &cli::ProgramOptions) -> Result<Vec<PathBu
             if read_pair_is_unmapped(&mapped_pair, opts)? {
                 bam_write_count += write_mapped_pair_to_bam(&mut bam_writer, &mapped_pair)?;
 
-                // Find the primary alignment in mapped_pair.read1 and convert it to fastq
-                let primary_read1 = extract_primary_read(&mapped_pair.read1)?;
-                fastqout1.write_record(&primary_read1)?;
+                if let Some(ref mut fq) = fastqout1 {
+                    // Find the primary alignment in mapped_pair.read1 and convert it to fastq
+                    let primary_read1 = extract_primary_read(&mapped_pair.read1)?;
+                    fq.write_record(&primary_read1)?;
+                    fastq_write_count += 1;
+                }
 
-                let primary_read2 = extract_primary_read(&mapped_pair.read2)?;
-                fastqout2.write_record(&primary_read2)?;
+                if let Some(ref mut fq) = fastqout2 {
+                    let primary_read2 = extract_primary_read(&mapped_pair.read2)?;
+                    fq.write_record(&primary_read2)?;
+                }
 
-                fastq_write_count += 1;
-
-                if fastq_write_count % 1_000_000 == 0 {
+                if fastq_write_count > 0 && fastq_write_count % 1_000_000 == 0 {
                     debug!(target: "IO",
                         "Wrote {} reads to fastq files",
                         fastq_write_count);

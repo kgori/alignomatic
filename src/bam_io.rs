@@ -1,11 +1,16 @@
-use std::{collections::VecDeque, env, path::Path, process::Command};
-
-use crate::{
-    read_types::MappedReadPair,
-    utils::{FifoGuard, ProcessGuard},
+use std::{
+    collections::VecDeque,
+    env,
+    path::{Path, PathBuf},
+    thread::{self, JoinHandle},
 };
+
+use crate::{read_types::MappedReadPair, utils::FifoGuard};
 use anyhow::{anyhow, Result};
+use itertools::Itertools;
+use log::info;
 use rust_htslib::bam::{self, Read};
+use tempfile::TempDir;
 
 pub struct BufferedBamReader {
     reader: bam::Reader,
@@ -104,14 +109,14 @@ pub struct CollatedBamReader {
     current_batch: Option<MappedReadPair>,
     buffer: VecDeque<bam::Record>,
     _fifo_guard: FifoGuard,
-    process_guard: ProcessGuard,
+    join_handle: Option<JoinHandle<Result<()>>>,
     exhausted: bool,
 }
 
 impl CollatedBamReader {
-    pub fn new(bam_path: &Path, temp_dir: Option<&Path>, threads: Option<usize>) -> Result<Self> {
-        // Get appropriate temp directory
-        let temp_dir = match temp_dir {
+    pub fn new(bam_path: &Path, temp_dir: Option<&Path>, _threads: Option<usize>) -> Result<Self> {
+        // Get appropriate temp directory for the FIFO
+        let fifo_temp_dir = match temp_dir {
             Some(dir) => dir.to_path_buf(),
             None => env::temp_dir(),
         };
@@ -123,33 +128,19 @@ impl CollatedBamReader {
             .unwrap_or_default()
             .as_secs();
         let fifo_name = format!("collated_bam_{}_{}.fifo", timestamp, pid);
-        let fifo_path = temp_dir.join(fifo_name);
+        let fifo_path = fifo_temp_dir.join(fifo_name);
 
         // Create the FIFO with automatic cleanup
         let fifo_guard = FifoGuard::new(&fifo_path)?;
 
-        // Set up threading
-        let threads = match threads {
-            Some(0) => 1,
-            Some(t) => t,
-            None => 1,
-        };
+        let bam_path_buf = bam_path.to_path_buf();
+        let fifo_path_buf = fifo_path.clone();
 
-        // Start the samtools process
-        let process = Command::new("samtools")
-            .arg("collate")
-            .arg("-u") // uncompressed BAM
-            .arg("-f") // Primary alignments only
-            .arg("-@")
-            .arg(threads.to_string())
-            .arg("-o")
-            .arg(&fifo_path)
-            .arg(bam_path)
-            .spawn()?;
+        // Spawn the collation thread
+        let join_handle =
+            thread::spawn(move || collate_bam_task(bam_path_buf, fifo_path_buf, 1_000_000));
 
-        let process_guard = ProcessGuard::new(process);
-
-        // Open the BAM file
+        // Open the BAM file (this will block until the thread opens it for writing)
         let reader = bam::Reader::from_path(&fifo_path)?;
 
         Ok(CollatedBamReader {
@@ -157,7 +148,7 @@ impl CollatedBamReader {
             current_batch: None,
             buffer: VecDeque::new(),
             _fifo_guard: fifo_guard,
-            process_guard,
+            join_handle: Some(join_handle),
             exhausted: false,
         })
     }
@@ -175,8 +166,14 @@ impl CollatedBamReader {
                 // No more records - check if process completed successfully
                 if !self.exhausted {
                     self.exhausted = true;
-                    // Wait for process to complete and check status
-                    self.process_guard.wait()?;
+                    // Check thread status
+                    if let Some(handle) = self.join_handle.take() {
+                        match handle.join() {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => return Err(anyhow!("Collation thread failed: {}", e)),
+                            Err(_) => return Err(anyhow!("Collation thread panicked")),
+                        }
+                    }
                 }
                 Ok(false)
             }
@@ -222,35 +219,119 @@ impl CollatedBamReader {
 
         Ok(Some(read_pair))
     }
-
-    // Check if the samtools process has completed
-    pub fn process_finished(&mut self) -> Result<bool> {
-        self.process_guard.try_wait()
-    }
 }
 
 impl Iterator for CollatedBamReader {
     type Item = Result<MappedReadPair>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Check if we've already encountered an error with the subprocess
-        if !self.exhausted && self.process_guard.try_wait().is_err() {
-            return Some(Err(anyhow!("samtools process failed")));
-        }
-
         match self.process_next_batch() {
             Ok(Some(pair)) => Some(Ok(pair)),
-            Ok(None) => {
-                // Double-check process status when we run out of records
-                if !self.exhausted {
-                    self.exhausted = true;
-                    if let Err(e) = self.process_guard.wait() {
-                        return Some(Err(e));
-                    }
-                }
-                None
-            }
+            Ok(None) => None,
             Err(e) => Some(Err(e)),
         }
     }
+}
+
+fn collate_bam_task(input_bam: PathBuf, output_fifo: PathBuf, batch_size: usize) -> Result<()> {
+    info!(target: "IO", "Starting native BAM collation");
+
+    // Create a temp dir for the sort chunks
+    let temp_dir = TempDir::new()?;
+    let mut chunk_files = Vec::new();
+
+    // 1. Read, Sort, Chunk
+    {
+        let mut reader = bam::Reader::from_path(&input_bam)?;
+        let header = bam::Header::from_template(reader.header());
+        let mut records = Vec::with_capacity(batch_size);
+
+        for record in reader.records() {
+            let record = record?;
+            records.push(record);
+
+            if records.len() >= batch_size {
+                let chunk_path = temp_dir
+                    .path()
+                    .join(format!("chunk_{}.bam", chunk_files.len()));
+                sort_and_write_chunk(&mut records, &chunk_path, &header)?;
+                chunk_files.push(chunk_path);
+            }
+        }
+
+        // Flush remaining
+        if !records.is_empty() {
+            let chunk_path = temp_dir
+                .path()
+                .join(format!("chunk_{}.bam", chunk_files.len()));
+            sort_and_write_chunk(&mut records, &chunk_path, &header)?;
+            chunk_files.push(chunk_path);
+        }
+    }
+
+    info!(target: "IO", "BAM collation: Merging {} chunks", chunk_files.len());
+
+    // 2. Merge
+    // Re-read header for writer
+    let reader = bam::Reader::from_path(&input_bam)?;
+    let header = bam::Header::from_template(reader.header());
+
+    // Open output writer (this blocks until main thread opens reader)
+    let mut writer = bam::Writer::from_path(&output_fifo, &header, bam::Format::Bam)?;
+
+    if chunk_files.is_empty() {
+        // Empty input, nothing to write
+        return Ok(());
+    }
+
+    // Create readers for all chunks
+    // Note: bam::Reader is not Send, but we are in one thread.
+    let mut chunk_readers = Vec::new();
+    for path in &chunk_files {
+        chunk_readers.push(bam::Reader::from_path(path)?);
+    }
+
+    // Merge logic
+    // We use kmerge_by. We need to handle Result<Record>.
+    // Comparison: if a.qname < b.qname.
+    // If we encounter error during iteration, we panic or try to pass it through?
+    // kmerge_by terminates on None.
+
+    let iterators = chunk_readers.iter_mut().map(|r| r.records());
+
+    let merged = iterators.kmerge_by(|res_a, res_b| {
+        match (res_a, res_b) {
+            (Ok(a), Ok(b)) => a.qname() < b.qname(),
+            (Err(_), _) => true, // bubble error up? priority doesn't matter much if erroring
+            (_, Err(_)) => false,
+        }
+    });
+
+    for record_res in merged {
+        let record = record_res?;
+        writer.write(&record)?;
+    }
+
+    info!(target: "IO", "Native BAM collation complete");
+    Ok(())
+}
+
+fn sort_and_write_chunk(
+    records: &mut Vec<bam::Record>,
+    path: &Path,
+    header: &bam::Header,
+) -> Result<()> {
+    // Sort by QNAME
+    records.sort_by(|a, b| a.qname().cmp(b.qname()));
+
+    // Write
+    // Use uncompressed BAM (Level 0) for speed in temp files?
+    // rust-htslib Format::Bam defaults to compressed.
+    // There isn't an easy way to set compression level in Writer::from_path without Config.
+    // Let's just use standard BAM.
+    let mut writer = bam::Writer::from_path(path, header, bam::Format::Bam)?;
+    for record in records.drain(..) {
+        writer.write(&record)?;
+    }
+    Ok(())
 }

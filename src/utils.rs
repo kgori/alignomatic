@@ -274,67 +274,6 @@ impl Drop for FifoGuard {
     }
 }
 
-pub struct ProcessGuard {
-    process: std::process::Child,
-    finished: bool,
-}
-
-impl ProcessGuard {
-    pub fn new(process: std::process::Child) -> Self {
-        ProcessGuard {
-            process,
-            finished: false,
-        }
-    }
-
-    pub fn try_wait(&mut self) -> Result<bool> {
-        if self.finished {
-            return Ok(true);
-        }
-
-        match self.process.try_wait() {
-            Ok(Some(status)) => {
-                self.finished = true;
-                if status.success() {
-                    Ok(true)
-                } else {
-                    Err(anyhow!("Process exited with error: {}", status))
-                }
-            }
-            Ok(None) => Ok(false),
-            Err(e) => Err(anyhow!("Failed to wait for process: {}", e)),
-        }
-    }
-
-    pub fn wait(&mut self) -> Result<()> {
-        if self.finished {
-            return Ok(());
-        }
-
-        let status = self.process.wait()?;
-
-        self.finished = true;
-
-        if !status.success() {
-            Err(anyhow!("Process exited with error: {}", status))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Drop for ProcessGuard {
-    fn drop(&mut self) {
-        if !self.finished {
-            // Try to wait for the process to finish gracefully
-            if self.process.wait().is_err() {
-                // If waiting fails, kill the process
-                let _ = self.process.kill();
-            }
-        }
-    }
-}
-
 pub fn extract_primary_read(records: &[bam::Record]) -> Result<fastq::Record> {
     if records.is_empty() {
         return Err(anyhow!("No records found"));

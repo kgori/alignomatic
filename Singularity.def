@@ -43,7 +43,6 @@ Stage: final
         zlib1g \
         libbz2-1.0 \
         liblzma5 \
-        samtools \
         ca-certificates \
         && rm -rf /var/lib/apt/lists/*
 

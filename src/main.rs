@@ -111,6 +111,7 @@ fn generate_alignments_from_bam(opts: &cli::ProgramOptions) -> Result<Vec<PathBu
             opts.bam_input.clone().unwrap().as_path(),
             Some(workspace.as_path()),
             Some(opts.threads),
+            None,
         )?;
 
         let mut bam_write_count = 0;

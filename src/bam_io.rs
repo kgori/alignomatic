@@ -1,11 +1,11 @@
 use std::{
     collections::VecDeque,
-    env,
     path::{Path, PathBuf},
+    sync::mpsc::{sync_channel, Receiver, SyncSender},
     thread::{self, JoinHandle},
 };
 
-use crate::{read_types::MappedReadPair, utils::FifoGuard};
+use crate::read_types::MappedReadPair;
 use anyhow::{anyhow, Result};
 use itertools::Itertools;
 use log::info;
@@ -105,49 +105,37 @@ impl BufferedBamReader {
 }
 
 pub struct CollatedBamReader {
-    reader: bam::Reader,
+    receiver: Receiver<Result<bam::Record>>,
     current_batch: Option<MappedReadPair>,
     buffer: VecDeque<bam::Record>,
-    _fifo_guard: FifoGuard,
     join_handle: Option<JoinHandle<Result<()>>>,
     exhausted: bool,
 }
 
 impl CollatedBamReader {
-    pub fn new(bam_path: &Path, temp_dir: Option<&Path>, _threads: Option<usize>) -> Result<Self> {
-        // Get appropriate temp directory for the FIFO
-        let fifo_temp_dir = match temp_dir {
-            Some(dir) => dir.to_path_buf(),
-            None => env::temp_dir(),
-        };
-
-        // Generate a unique FIFO name
-        let pid = std::process::id();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let fifo_name = format!("collated_bam_{}_{}.fifo", timestamp, pid);
-        let fifo_path = fifo_temp_dir.join(fifo_name);
-
-        // Create the FIFO with automatic cleanup
-        let fifo_guard = FifoGuard::new(&fifo_path)?;
-
+    pub fn new(
+        bam_path: &Path,
+        _temp_dir: Option<&Path>,
+        _threads: Option<usize>,
+        batch_size: Option<usize>,
+    ) -> Result<Self> {
         let bam_path_buf = bam_path.to_path_buf();
-        let fifo_path_buf = fifo_path.clone();
+        let batch_size = batch_size.unwrap_or(1_000_000);
+
+        // Create a bounded channel (sync_channel) to provide backpressure.
+        // Size 5000 records seems reasonable?
+        // 1M batch size in bytes vs records.
+        // Let's use a channel bound of 2048 records. This prevents the sorter from reading
+        // the entire file into memory if the consumer is slow.
+        let (sender, receiver) = sync_channel(2048);
 
         // Spawn the collation thread
-        let join_handle =
-            thread::spawn(move || collate_bam_task(bam_path_buf, fifo_path_buf, 1_000_000));
-
-        // Open the BAM file (this will block until the thread opens it for writing)
-        let reader = bam::Reader::from_path(&fifo_path)?;
+        let join_handle = thread::spawn(move || collate_bam_task(bam_path_buf, sender, batch_size));
 
         Ok(CollatedBamReader {
-            reader,
+            receiver,
             current_batch: None,
             buffer: VecDeque::new(),
-            _fifo_guard: fifo_guard,
             join_handle: Some(join_handle),
             exhausted: false,
         })
@@ -155,18 +143,17 @@ impl CollatedBamReader {
 
     // Helper method to fill the buffer with reads
     fn fill_buffer(&mut self) -> Result<bool> {
-        let mut record = bam::Record::new();
-        match self.reader.read(&mut record) {
-            Some(Ok(())) => {
+        match self.receiver.recv() {
+            Ok(Ok(record)) => {
                 self.buffer.push_back(record);
                 Ok(true)
             }
-            Some(Err(e)) => Err(anyhow!("Error reading BAM record: {}", e)),
-            None => {
-                // No more records - check if process completed successfully
+            Ok(Err(e)) => Err(anyhow!("Error from collation thread: {}", e)),
+            Err(_) => {
+                // Channel closed (sender dropped), meaning task finished.
                 if !self.exhausted {
                     self.exhausted = true;
-                    // Check thread status
+                    // Check thread status for panic or error returned from the function
                     if let Some(handle) = self.join_handle.take() {
                         match handle.join() {
                             Ok(Ok(())) => {}
@@ -233,7 +220,11 @@ impl Iterator for CollatedBamReader {
     }
 }
 
-fn collate_bam_task(input_bam: PathBuf, output_fifo: PathBuf, batch_size: usize) -> Result<()> {
+fn collate_bam_task(
+    input_bam: PathBuf,
+    sender: SyncSender<Result<bam::Record>>,
+    batch_size: usize,
+) -> Result<()> {
     info!(target: "IO", "Starting native BAM collation");
 
     // Create a temp dir for the sort chunks
@@ -271,18 +262,12 @@ fn collate_bam_task(input_bam: PathBuf, output_fifo: PathBuf, batch_size: usize)
 
     info!(target: "IO", "BAM collation: Merging {} chunks", chunk_files.len());
 
-    // 2. Merge
-    // Re-read header for writer
-    let reader = bam::Reader::from_path(&input_bam)?;
-    let header = bam::Header::from_template(reader.header());
-
-    // Open output writer (this blocks until main thread opens reader)
-    let mut writer = bam::Writer::from_path(&output_fifo, &header, bam::Format::Bam)?;
-
     if chunk_files.is_empty() {
         // Empty input, nothing to write
         return Ok(());
     }
+
+    // 2. Merge
 
     // Create readers for all chunks
     // Note: bam::Reader is not Send, but we are in one thread.
@@ -309,7 +294,10 @@ fn collate_bam_task(input_bam: PathBuf, output_fifo: PathBuf, batch_size: usize)
 
     for record_res in merged {
         let record = record_res?;
-        writer.write(&record)?;
+        if sender.send(Ok(record)).is_err() {
+            // Receiver dropped, stop processing
+            break;
+        }
     }
 
     info!(target: "IO", "Native BAM collation complete");
@@ -335,3 +323,6 @@ fn sort_and_write_chunk(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

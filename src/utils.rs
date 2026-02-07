@@ -11,7 +11,6 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 /// Intercepts any stderr output from the wrapped function
 pub fn silence_stderr<T, F>(f: F) -> Result<T>
@@ -237,40 +236,6 @@ pub fn read_pair_is_unmapped(mapped_pair: &MappedReadPair, opts: &ProgramOptions
             Ok(false)
         }
         _ => Ok(true),
-    }
-}
-
-// RAII struct to ensure cleanup of FIFO on drop
-pub struct FifoGuard {
-    path: PathBuf,
-}
-
-impl FifoGuard {
-    pub fn new(path: &Path) -> Result<Self> {
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-
-        let status = Command::new("mkfifo")
-            .arg(path)
-            .status()
-            .map_err(|e| anyhow!("Failed to create FIFO: {}", e))?;
-
-        if !status.success() {
-            return Err(anyhow!("mkfifo failed with status: {}", status));
-        }
-
-        Ok(FifoGuard {
-            path: path.to_path_buf(),
-        })
-    }
-}
-
-impl Drop for FifoGuard {
-    fn drop(&mut self) {
-        if self.path.exists() {
-            let _ = std::fs::remove_file(&self.path);
-        }
     }
 }
 

@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "alignomatic"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "bgzf",
@@ -263,8 +263,8 @@ dependencies = [
 
 [[package]]
 name = "bwa"
-version = "0.1.4"
-source = "git+https://github.com/kgori/rust-bwa.git?branch=dev#b9e14e49a0628e9c324693d2efd0ee2e8e4ae57e"
+version = "0.1.5"
+source = "git+https://github.com/kgori/rust-bwa.git?tag=v0.1.5#de5e6235bcee8034bb30f4bd851073a197349528"
 dependencies = [
  "bio",
  "bwa-sys",
@@ -276,7 +276,7 @@ dependencies = [
 [[package]]
 name = "bwa-sys"
 version = "0.1.0"
-source = "git+https://github.com/kgori/rust-bwa.git?branch=dev#b9e14e49a0628e9c324693d2efd0ee2e8e4ae57e"
+source = "git+https://github.com/kgori/rust-bwa.git?tag=v0.1.5#de5e6235bcee8034bb30f4bd851073a197349528"
 dependencies = [
  "cc",
  "libc",

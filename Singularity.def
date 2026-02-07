@@ -1,0 +1,54 @@
+Bootstrap: docker
+From: rust:bookworm
+Stage: builder
+
+%post
+    # Install build dependencies
+    apt-get update && apt-get install -y \
+        clang \
+        llvm \
+        libclang-dev \
+        zlib1g-dev \
+        libbz2-dev \
+        liblzma-dev \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Prepare directory
+    mkdir -p /usr/src/alignomatic
+
+%files
+    # Copy project files
+    Cargo.toml /usr/src/alignomatic/
+    Cargo.lock /usr/src/alignomatic/
+    src /usr/src/alignomatic/src
+
+%post
+    # Build the application
+    cd /usr/src/alignomatic
+    cargo build --release
+
+# -----------------------------------------------------------------------------
+# Final Stage
+# -----------------------------------------------------------------------------
+Bootstrap: docker
+From: debian:bookworm-slim
+Stage: final
+
+%files from builder
+    /usr/src/alignomatic/target/release/alignomatic /usr/local/bin/alignomatic
+
+%post
+    # Install runtime dependencies
+    apt-get update && apt-get install -y \
+        zlib1g \
+        libbz2-1.0 \
+        liblzma5 \
+        ca-certificates \
+        && rm -rf /var/lib/apt/lists/*
+
+%runscript
+    exec alignomatic "$@"
+
+%labels
+    Author kgori
+    Version 0.5.1
